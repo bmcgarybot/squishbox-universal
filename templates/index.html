@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SquishBox</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232734;
+    --border: #2d3245;
+    --text: #e4e6f0;
+    --text-dim: #8b8fa3;
+    --accent: #7c5cfc;
+    --accent-hover: #6a48e8;
+    --green: #34d399;
+    --red: #f87171;
+    --orange: #fbbf24;
+    --blue: #60a5fa;
+    --radius: 10px;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* Header */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 32px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .header h1 { font-size: 1.5rem; font-weight: 700; }
+  .header h1 span { color: var(--accent); }
+  .header-right { display: flex; gap: 12px; align-items: center; }
+  .hw-badge {
+    font-size: 0.75rem;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-weight: 600;
+  }
+  .hw-badge.available { background: rgba(52,211,153,0.15); color: var(--green); }
+  .hw-badge.unavailable { background: rgba(248,113,113,0.15); color: var(--red); }
+
+  /* Layout */
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px 32px; }
+
+  /* Folder input */
+  .folder-bar {
+    display: flex; gap: 10px; margin-bottom: 24px;
+  }
+  .folder-bar input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    color: var(--text);
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .folder-bar input:focus { border-color: var(--accent); }
+  .folder-bar input::placeholder { color: var(--text-dim); }
+
+  /* Buttons */
+  .btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: var(--radius);
+    font-weight: 600;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn-green { background: var(--green); color: #000; }
+  .btn-green:hover:not(:disabled) { background: #2bc48a; }
+  .btn-red { background: var(--red); color: #000; }
+  .btn-red:hover:not(:disabled) { background: #e65c5c; }
+  .btn-sm { padding: 6px 14px; font-size: 0.8rem; }
+  .btn-outline {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .btn-outline:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+
+  /* Stats bar */
+  .stats-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .stat-card .label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .stat-card .value { font-size: 1.4rem; font-weight: 700; }
+  .stat-card .value.green { color: var(--green); }
+  .stat-card .value.blue { color: var(--blue); }
+  .stat-card .value.orange { color: var(--orange); }
+
+  /* Action bar */
+  .action-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .action-bar-left { display: flex; gap: 10px; align-items: center; }
+
+  /* File table */
+  .file-table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left;
+    padding: 12px 16px;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 10px 16px;
+    font-size: 0.875rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(124,92,252,0.04); }
+
+  .codec-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .codec-hevc { background: rgba(52,211,153,0.15); color: var(--green); }
+  .codec-other { background: rgba(251,191,36,0.15); color: var(--orange); }
+
+  /* Progress bar */
+  .progress-wrap {
+    width: 100%;
+    min-width: 120px;
+  }
+  .progress-bar-bg {
+    height: 8px;
+    background: var(--surface2);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 4px;
+    transition: width 0.5s ease;
+  }
+  .progress-bar-fill.done { background: var(--green); }
+  .progress-info {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    margin-top: 3px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* Status badges */
+  .status-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .status-pending { background: rgba(139,143,163,0.15); color: var(--text-dim); }
+  .status-queued { background: rgba(96,165,250,0.15); color: var(--blue); }
+  .status-encoding { background: rgba(124,92,252,0.15); color: var(--accent); }
+  .status-done { background: rgba(52,211,153,0.15); color: var(--green); }
+  .status-error { background: rgba(248,113,113,0.15); color: var(--red); }
+  .status-skipped { background: rgba(139,143,163,0.1); color: var(--text-dim); }
+  .status-cancelled { background: rgba(251,191,36,0.15); color: var(--orange); }
+
+  /* Settings panel */
+  .settings-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+  }
+  .settings-overlay.open { display: flex; }
+  .settings-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px;
+    width: 480px;
+    max-width: 95vw;
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+  .settings-panel h2 { margin-bottom: 24px; font-size: 1.25rem; }
+  .setting-group { margin-bottom: 20px; }
+  .setting-group label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+  }
+  .setting-group select, .setting-group input[type=range] {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 0.9rem;
+    outline: none;
+  }
+  .setting-group select { cursor: pointer; }
+  .setting-group select option { background: var(--surface2); }
+  input[type=range] {
+    -webkit-appearance: none;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+    padding: 0;
+    border: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+  }
+  .range-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+  .range-value {
+    text-align: center;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin-top: 4px;
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+  }
+  .toggle-row .toggle-label { font-size: 0.9rem; }
+  .toggle-row .toggle-desc { font-size: 0.75rem; color: var(--text-dim); }
+  .toggle {
+    width: 44px; height: 24px;
+    background: var(--border);
+    border-radius: 12px;
+    position: relative;
+    cursor: pointer;
+    transition: background 0.2s;
+    flex-shrink: 0;
+  }
+  .toggle.on { background: var(--accent); }
+  .toggle::after {
+    content: '';
+    position: absolute;
+    width: 18px; height: 18px;
+    background: #fff;
+    border-radius: 50%;
+    top: 3px; left: 3px;
+    transition: transform 0.2s;
+  }
+  .toggle.on::after { transform: translateX(20px); }
+
+  .settings-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-dim);
+  }
+  .empty-state .icon { font-size: 3rem; margin-bottom: 12px; }
+  .empty-state p { font-size: 0.95rem; }
+
+  /* Saved size in table */
+  .saved { color: var(--green); font-weight: 600; font-size: 0.8rem; }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .container { padding: 16px; }
+    .header { padding: 16px; }
+    th, td { padding: 8px 10px; font-size: 0.8rem; }
+    .stats-bar { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  /* Scrollable table */
+  .file-table-wrap { overflow-x: auto; }
+
+  /* Filename truncation */
+  .fname { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <h1>🗜️ <span>Squish</span>Box</h1>
+  <div class="header-right">
+    <span id="hwBadge" class="hw-badge unavailable">HW: checking…</span>
+    <button class="btn btn-outline btn-sm" onclick="openSettings()">⚙️ Settings</button>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Folder input -->
+  <div class="folder-bar">
+    <input type="text" id="folderInput" placeholder="Paste a folder path, e.g. D:\Videos\Movies" autofocus>
+    <button class="btn btn-primary" id="scanBtn" onclick="scanFolder()">🔍 Scan</button>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-bar" id="statsBar" style="display:none;">
+    <div class="stat-card">
+      <div class="label">Space Saved</div>
+      <div class="value green" id="statSaved">0 B</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Processed</div>
+      <div class="value blue" id="statProcessed">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Remaining</div>
+      <div class="value orange" id="statRemaining">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Status</div>
+      <div class="value" id="statStatus" style="font-size:1rem;">Idle</div>
+    </div>
+  </div>
+
+  <!-- Action bar -->
+  <div class="action-bar" id="actionBar" style="display:none;">
+    <div class="action-bar-left">
+      <button class="btn btn-green" id="squishAllBtn" onclick="squishAll()">🗜️ Squish All</button>
+      <button class="btn btn-red btn-sm" id="cancelBtn" onclick="cancelEncode()" style="display:none;">⏹ Cancel</button>
+      <button class="btn btn-outline btn-sm" onclick="rescan()">🔄 Rescan</button>
+    </div>
+    <div style="font-size:0.8rem; color:var(--text-dim);" id="folderLabel"></div>
+  </div>
+
+  <!-- File list -->
+  <div id="fileArea">
+    <div class="empty-state">
+      <div class="icon">📁</div>
+      <p>Paste a folder path above and hit Scan to get started.</p>
+    </div>
+  </div>
+
+</div>
+
+<!-- Settings overlay -->
+<div class="settings-overlay" id="settingsOverlay" onclick="closeSettingsOutside(event)">
+  <div class="settings-panel">
+    <h2>⚙️ Settings</h2>
+
+    <div class="setting-group">
+      <label>Quality (CRF / Global Quality)</label>
+      <input type="range" id="setQuality" min="18" max="28" value="23" oninput="updateQualityLabel()">
+      <div class="range-labels"><span>18 – Visually Lossless</span><span>28 – Small File</span></div>
+      <div class="range-value" id="qualityLabel">23</div>
+    </div>
+
+    <div class="setting-group">
+      <label>Max Resolution</label>
+      <select id="setResolution">
+        <option value="0">4K (no downscale)</option>
+        <option value="1080" selected>1080p</option>
+        <option value="720">720p</option>
+      </select>
+    </div>
+
+    <div class="setting-group">
+      <label>Container</label>
+      <select id="setContainer">
+        <option value="mkv" selected>MKV</option>
+        <option value="mp4">MP4</option>
+      </select>
+    </div>
+
+    <div class="setting-group">
+      <label>Hardware Encoding</label>
+      <select id="setHwMode">
+        <option value="auto" selected>Auto-detect</option>
+        <option value="qsv">Intel QSV</option>
+        <option value="nvenc">Nvidia NVENC</option>
+        <option value="videotoolbox">macOS VideoToolbox</option>
+        <option value="vaapi">Linux VAAPI</option>
+        <option value="cpu">Force CPU (libx265)</option>
+      </select>
+    </div>
+
+    <div class="setting-group">
+      <label>Output Naming</label>
+      <select id="setOutputMode">
+        <option value="suffix" selected>Add _squished suffix</option>
+        <option value="replace">Replace original</option>
+      </select>
+    </div>
+
+    <div class="setting-group">
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Delete originals after encode</div>
+          <div class="toggle-desc">Only in suffix mode. Permanently removes the source file.</div>
+        </div>
+        <div class="toggle" id="setDeleteOriginals" onclick="toggleDelete()"></div>
+      </div>
+    </div>
+
+    <div class="settings-footer">
+      <button class="btn btn-outline" onclick="closeSettings()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let pollTimer = null;
+let currentFiles = [];
+let isEncoding = false;
+
+// -- Scan --
+async function scanFolder() {
+  const folder = document.getElementById('folderInput').value.trim();
+  if (!folder) return;
+  document.getElementById('scanBtn').disabled = true;
+  document.getElementById('scanBtn').textContent = '⏳ Scanning…';
+  try {
+    const r = await fetch(API + '/api/scan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({folder})
+    });
+    const data = await r.json();
+    if (data.error) { alert(data.error); return; }
+    document.getElementById('statsBar').style.display = '';
+    document.getElementById('actionBar').style.display = '';
+    document.getElementById('folderLabel').textContent = folder;
+    refreshFiles();
+    startPolling();
+  } catch (e) {
+    alert('Failed to scan: ' + e.message);
+  } finally {
+    document.getElementById('scanBtn').disabled = false;
+    document.getElementById('scanBtn').textContent = '🔍 Scan';
+  }
+}
+
+// Enter key on folder input
+document.getElementById('folderInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') scanFolder();
+});
+
+// -- Refresh --
+async function refreshFiles() {
+  try {
+    const r = await fetch(API + '/api/files');
+    const data = await r.json();
+    currentFiles = data.files;
+    renderFiles(data.files);
+    updateStats(data.stats);
+  } catch (e) {}
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(refreshFiles, 1500);
+}
+
+// -- Render files --
+function renderFiles(files) {
+  const area = document.getElementById('fileArea');
+  if (!files || files.length === 0) {
+    area.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No video files found in this folder.</p></div>';
+    return;
+  }
+
+  let html = '<div class="file-table-wrap"><table><thead><tr>';
+  html += '<th>File</th><th>Codec</th><th>Resolution</th><th>Size</th><th>Duration</th><th>Progress</th><th>Status</th><th>Saved</th><th></th>';
+  html += '</tr></thead><tbody>';
+
+  for (const f of files) {
+    const codecClass = (f.codec === 'hevc' || f.codec === 'h265' || f.codec === 'hev1') ? 'codec-hevc' : 'codec-other';
+    const statusClass = 'status-' + f.status;
+
+    let progressHtml = '';
+    if (f.status === 'encoding') {
+      progressHtml = `
+        <div class="progress-wrap">
+          <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${f.progress}%"></div></div>
+          <div class="progress-info"><span>${f.progress}%</span><span>${f.speed_fps} fps</span><span>${f.eta || '…'}</span></div>
+        </div>`;
+    } else if (f.status === 'done') {
+      progressHtml = '<div class="progress-wrap"><div class="progress-bar-bg"><div class="progress-bar-fill done" style="width:100%"></div></div></div>';
+    } else if (f.status === 'queued') {
+      progressHtml = `<span style="color:var(--text-dim);font-size:0.8rem;">Queue #${f.queue_pos}</span>`;
+    } else if (f.status === 'error') {
+      progressHtml = `<span style="color:var(--red);font-size:0.75rem;" title="${esc(f.error)}">⚠ ${esc(f.error).substring(0,30)}</span>`;
+    }
+
+    const canSquish = f.status === 'pending';
+    const btnHtml = canSquish
+      ? `<button class="btn btn-primary btn-sm" onclick="squishOne('${f.id}')">🗜️</button>`
+      : '';
+
+    html += `<tr>
+      <td class="fname" title="${esc(f.filename)}">${esc(f.filename)}</td>
+      <td><span class="codec-badge ${codecClass}">${esc(f.codec)}</span></td>
+      <td>${esc(f.resolution)}</td>
+      <td>${esc(f.size_fmt)}</td>
+      <td>${esc(f.duration_fmt)}</td>
+      <td>${progressHtml}</td>
+      <td><span class="status-badge ${statusClass}">${f.status}</span></td>
+      <td>${f.space_saved_fmt ? '<span class="saved">-' + esc(f.space_saved_fmt) + '</span>' : ''}</td>
+      <td>${btnHtml}</td>
+    </tr>`;
+  }
+
+  html += '</tbody></table></div>';
+  area.innerHTML = html;
+}
+
+function esc(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// -- Stats --
+function updateStats(s) {
+  document.getElementById('statSaved').textContent = s.total_space_saved_fmt;
+  document.getElementById('statProcessed').textContent = s.files_processed;
+  document.getElementById('statRemaining').textContent = s.files_remaining;
+  isEncoding = s.is_encoding;
+  document.getElementById('statStatus').textContent = s.is_encoding ? '🔥 Encoding…' : 'Idle';
+  document.getElementById('cancelBtn').style.display = s.is_encoding ? '' : 'none';
+  document.getElementById('squishAllBtn').disabled = s.is_encoding;
+}
+
+// -- Actions --
+async function squishAll() {
+  await fetch(API + '/api/squish-all', {method: 'POST'});
+  refreshFiles();
+}
+
+async function squishOne(id) {
+  await fetch(API + '/api/squish', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id})
+  });
+  refreshFiles();
+}
+
+async function cancelEncode() {
+  if (!confirm('Cancel encoding? Current file will be stopped and queue cleared.')) return;
+  await fetch(API + '/api/cancel', {method: 'POST'});
+  refreshFiles();
+}
+
+async function rescan() {
+  await fetch(API + '/api/rescan', {method: 'POST'});
+  refreshFiles();
+}
+
+// -- Settings --
+async function loadSettings() {
+  try {
+    const r = await fetch(API + '/api/settings');
+    const s = await r.json();
+    document.getElementById('setQuality').value = s.quality;
+    document.getElementById('setResolution').value = s.max_resolution;
+    document.getElementById('setContainer').value = s.container;
+    document.getElementById('setHwMode').value = s.hw_mode;
+    document.getElementById('setOutputMode').value = s.output_mode;
+    const del = document.getElementById('setDeleteOriginals');
+    if (s.delete_originals) del.classList.add('on');
+    else del.classList.remove('on');
+    updateQualityLabel();
+
+    const badge = document.getElementById('hwBadge');
+    if (s.hw_encoders) {
+      const avail = Object.entries(s.hw_encoders).filter(([k,v]) => v).map(([k]) => k.toUpperCase());
+      if (avail.length > 0) {
+        badge.textContent = 'HW: ' + avail.join(', ') + ' → ' + (s.active_encoder || 'cpu');
+        badge.className = 'hw-badge available';
+      } else {
+        badge.textContent = 'HW: CPU only (no GPU encoder found)';
+        badge.className = 'hw-badge unavailable';
+      }
+    }
+  } catch(e) {}
+}
+
+function openSettings() {
+  loadSettings();
+  document.getElementById('settingsOverlay').classList.add('open');
+}
+
+function closeSettings() {
+  document.getElementById('settingsOverlay').classList.remove('open');
+}
+
+function closeSettingsOutside(e) {
+  if (e.target === document.getElementById('settingsOverlay')) closeSettings();
+}
+
+function updateQualityLabel() {
+  const v = document.getElementById('setQuality').value;
+  document.getElementById('qualityLabel').textContent = v;
+}
+
+function toggleDelete() {
+  document.getElementById('setDeleteOriginals').classList.toggle('on');
+}
+
+async function saveSettings() {
+  const s = {
+    quality: parseInt(document.getElementById('setQuality').value),
+    max_resolution: parseInt(document.getElementById('setResolution').value),
+    container: document.getElementById('setContainer').value,
+    hw_mode: document.getElementById('setHwMode').value,
+    output_mode: document.getElementById('setOutputMode').value,
+    delete_originals: document.getElementById('setDeleteOriginals').classList.contains('on'),
+  };
+  await fetch(API + '/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(s)
+  });
+  closeSettings();
+}
+
+// Init
+loadSettings();
+</script>
+</body>
+</html>
