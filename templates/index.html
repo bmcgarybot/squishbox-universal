@@ -440,7 +440,7 @@
     <input type="text" id="folderInput" placeholder="Paste a folder path, e.g. D:\Videos\Movies" autofocus>
     <button class="btn btn-outline" onclick="openBrowser()">📂 Browse</button>
     <button class="btn btn-primary" id="scanBtn" onclick="scanFolder()">🔍 Scan</button>
-    <button class="btn btn-outline btn-sm" id="addFolderBtn" onclick="addFolder()" style="display:none;" title="Add another folder to the queue">➕ Add Folder</button>
+    <button class="btn btn-outline btn-sm" id="addFolderBtn" onclick="openBrowserForAdd()" style="display:none;" title="Add another folder to the queue">➕ Add Folder</button>
   </div>
 
   <!-- Active folders -->
@@ -532,7 +532,7 @@
       </div>
       <div style="display:flex;gap:8px;">
         <button class="btn btn-outline btn-sm" onclick="closeBrowser()">Cancel</button>
-        <button class="btn btn-green btn-sm" onclick="browserSelect()">✅ Select This Folder</button>
+        <button class="btn btn-green btn-sm" onclick="browserSelect()" id="browserSelectBtn">✅ Scan This Folder</button>
       </div>
     </div>
   </div>
@@ -958,14 +958,23 @@ async function saveSettings() {
 let browserCurrentPath = '';
 
 async function openBrowser() {
+  browserMode = 'scan';
   document.getElementById('browserOverlay').classList.add('open');
-  // Start at whatever's in the input, or drives/root
+  document.getElementById('browserSelectBtn').textContent = '✅ Scan This Folder';
   const inputPath = document.getElementById('folderInput').value.trim();
   await browserNavigate(inputPath || '');
 }
 
 function closeBrowser() {
   document.getElementById('browserOverlay').classList.remove('open');
+}
+
+function openBrowserForAdd() {
+  browserMode = 'add';
+  document.getElementById('browserOverlay').classList.add('open');
+  document.getElementById('browserSelectBtn').textContent = '➕ Add This Folder';
+  const inputPath = document.getElementById('folderInput').value.trim();
+  browserNavigate(inputPath || '');
 }
 
 function closeBrowserOutside(e) {
@@ -1032,11 +1041,20 @@ function browserHome() {
   browserNavigate('');
 }
 
+var browserMode = 'scan'; // 'scan' or 'add'
+
 function browserSelect() {
   if (browserCurrentPath) {
-    document.getElementById('folderInput').value = browserCurrentPath;
+    if (browserMode === 'add') {
+      document.getElementById('folderInput').value = browserCurrentPath;
+      closeBrowser();
+      addFolder();
+    } else {
+      document.getElementById('folderInput').value = browserCurrentPath;
+      closeBrowser();
+      scanFolder();
+    }
   }
-  closeBrowser();
 }
 
 // -- History --
