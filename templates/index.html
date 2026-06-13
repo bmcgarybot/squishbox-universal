@@ -625,6 +625,7 @@ async function scanFolder() {
     if (data.error) { alert(data.error); return; }
     document.getElementById('statsBar').style.display = '';
     document.getElementById('actionBar').style.display = '';
+    document.getElementById('addFolderBtn').style.display = '';
     document.getElementById('folderLabel').textContent = folder;
     refreshFiles();
     startPolling();
@@ -1104,6 +1105,7 @@ loadSettings();
       document.getElementById('folderInput').value = data.folder;
       document.getElementById('statsBar').style.display = '';
       document.getElementById('actionBar').style.display = '';
+      document.getElementById('addFolderBtn').style.display = '';
       document.getElementById('folderLabel').textContent = data.folder;
       currentFiles = data.files;
       renderFiles(data.files);
