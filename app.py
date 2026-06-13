@@ -597,7 +597,6 @@ def _encode_one(file_id: str, worker_id: int):
 
     # Success
     entry["progress"] = 100
-    entry["status"] = "done"
 
     # Handle replace mode
     final_dst = _final_path(src, dst)
@@ -625,6 +624,9 @@ def _encode_one(file_id: str, worker_id: int):
         pass
 
     stats["files_processed"] += 1
+
+    # Mark done AFTER size is calculated (avoids race with frontend poll)
+    entry["status"] = "done"
 
     # Save to job history
     _save_history_entry(entry, new_size)
