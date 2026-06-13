@@ -589,10 +589,12 @@ def _encode_one(file_id: str, worker_id: int):
         pass
 
     if not success:
-        entry["status"] = "error"
-        error_lines = [l for l in err_lines if not l.startswith("frame=") and not l.startswith("size=")]
-        err_detail = " | ".join(error_lines[-5:]) if error_lines else "unknown error"
-        entry["error"] = err_detail[:300]
+        # Don't overwrite "cancelled" status with "error"
+        if entry.get("status") != "cancelled":
+            entry["status"] = "error"
+            error_lines = [l for l in err_lines if not l.startswith("frame=") and not l.startswith("size=")]
+            err_detail = " | ".join(error_lines[-5:]) if error_lines else "unknown error"
+            entry["error"] = err_detail[:300]
         return
 
     # Success
@@ -1017,16 +1019,18 @@ def api_cancel_all():
     time.sleep(0.5)
     with encoding_lock:
         for fid, entry in scanned_files.items():
-            if entry["status"] in ("encoding", "queued"):
+            if entry["status"] in ("encoding", "queued", "cancelled"):
                 entry["status"] = "pending"
                 entry["progress"] = 0
                 entry["speed_fps"] = 0
                 entry["eta"] = ""
+                entry["error"] = ""
                 entry["queue_pos"] = 0
         encode_queue.clear()
         # Clean up workers
         for wid in list(active_workers.keys()):
             active_workers[wid]["file_id"] = None
+    cancel_event.clear()
     _save_state()
     return jsonify({"ok": True})
 
