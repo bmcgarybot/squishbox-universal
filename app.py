@@ -90,8 +90,9 @@ encoding_lock = threading.Lock()
 cancel_event = threading.Event()
 
 # Multi-worker pool
-max_workers: int = 1               # configurable worker count
-active_workers: dict[int, dict] = {}  # {worker_id: {"thread": Thread, "file_id": str|None}}
+gpu_workers: int = 1               # GPU worker count
+cpu_workers: int = 0               # CPU worker count
+active_workers: dict[int, dict] = {}  # {worker_id: {"thread": Thread, "file_id": str|None, "type": "gpu"|"cpu"}}
 _next_worker_id: int = 0
 scan_folders: list[str] = []       # all scanned folder paths
 
@@ -500,9 +501,9 @@ def _run_ffmpeg(cmd, entry, duration, dst):
         return False, [str(e)]
 
 
-def _encode_one(file_id: str, worker_id: int):
-    """Encode a single file with automatic fallbacks:
-    1. GPU encoder (AMF/QSV/NVENC) → 2. GPU simple mode → 3. CPU → 4. CPU simple mode
+def _encode_one(file_id: str, worker_id: int, worker_type: str = "gpu"):
+    """Encode a single file.
+    worker_type: 'gpu' tries GPU first with CPU fallback, 'cpu' uses CPU only.
     """
     if worker_id in active_workers:
         active_workers[worker_id]["file_id"] = file_id
@@ -542,9 +543,9 @@ def _encode_one(file_id: str, worker_id: int):
     success = False
     err_lines = []
 
-    # Build list of attempts: GPU full → GPU simple → CPU full → CPU simple
+    # Build list of attempts based on worker type
     gpu_enc = detect_gpu_encoder()
-    if settings["hw_mode"] != "cpu" and gpu_enc:
+    if worker_type == "gpu" and settings["hw_mode"] != "cpu" and gpu_enc:
         attempts.append(("GPU", False))
         attempts.append(("GPU", True))
     attempts.append(("CPU", False))
@@ -644,15 +645,16 @@ def _encode_one(file_id: str, worker_id: int):
             pass
 
 
-def _worker(worker_id: int):
+def _worker(worker_id: int, worker_type: str = "gpu"):
     """Process the encode queue. Each worker pulls one file at a time."""
     while True:
         with encoding_lock:
+            total_target = gpu_workers + cpu_workers
             if not encode_queue or cancel_event.is_set():
                 if worker_id in active_workers:
                     active_workers[worker_id]["file_id"] = None
                     # Remove this worker if we're over the limit
-                    if len(active_workers) > max_workers:
+                    if len(active_workers) > total_target:
                         del active_workers[worker_id]
                         return
                 cancel_event.clear()
@@ -663,7 +665,7 @@ def _worker(worker_id: int):
                 if qid in scanned_files:
                     scanned_files[qid]["queue_pos"] = i + 1
 
-        _encode_one(file_id, worker_id)
+        _encode_one(file_id, worker_id, worker_type)
 
         if cancel_event.is_set():
             # Mark remaining as pending
@@ -680,21 +682,39 @@ def _worker(worker_id: int):
 
 
 def _start_workers():
-    """Ensure the right number of worker threads are running."""
+    """Ensure the right number of GPU and CPU worker threads are running."""
     global _next_worker_id
     # Clean up dead workers
     dead = [wid for wid, w in active_workers.items() if not w["thread"].is_alive()]
     for wid in dead:
         del active_workers[wid]
 
-    # Spin up workers to match max_workers (if there's work to do)
+    if not encode_queue:
+        return
+
     cancel_event.clear()
-    while len(active_workers) < max_workers and encode_queue:
+
+    # Count current workers by type
+    current_gpu = sum(1 for w in active_workers.values() if w.get("type") == "gpu")
+    current_cpu = sum(1 for w in active_workers.values() if w.get("type") == "cpu")
+
+    # Spin up GPU workers
+    while current_gpu < gpu_workers and encode_queue:
         wid = _next_worker_id
         _next_worker_id += 1
-        t = threading.Thread(target=_worker, args=(wid,), daemon=True)
-        active_workers[wid] = {"thread": t, "file_id": None}
+        t = threading.Thread(target=_worker, args=(wid, "gpu"), daemon=True)
+        active_workers[wid] = {"thread": t, "file_id": None, "type": "gpu"}
         t.start()
+        current_gpu += 1
+
+    # Spin up CPU workers
+    while current_cpu < cpu_workers and encode_queue:
+        wid = _next_worker_id
+        _next_worker_id += 1
+        t = threading.Thread(target=_worker, args=(wid, "cpu"), daemon=True)
+        active_workers[wid] = {"thread": t, "file_id": None, "type": "cpu"}
+        t.start()
+        current_cpu += 1
 
 
 # ---------------------------------------------------------------------------
@@ -873,7 +893,9 @@ def api_files():
             "files_remaining": len(encode_queue) + len(_active_file_ids()),
             "is_encoding": len(_active_file_ids()) > 0,
             "workers_active": len(_active_file_ids()),
-            "workers_max": max_workers,
+            "gpu_workers": gpu_workers,
+            "cpu_workers": cpu_workers,
+            "workers_max": gpu_workers + cpu_workers,
             "folders": scan_folders,
         },
     })
@@ -1043,6 +1065,7 @@ def api_get_workers():
         entry = scanned_files.get(w["file_id"]) if w["file_id"] else None
         workers.append({
             "id": wid,
+            "type": w.get("type", "gpu"),
             "file_id": w["file_id"],
             "filename": entry["filename"] if entry else None,
             "progress": entry["progress"] if entry else 0,
@@ -1052,24 +1075,39 @@ def api_get_workers():
         })
     return jsonify({
         "workers": workers,
-        "max_workers": max_workers,
+        "gpu_workers": gpu_workers,
+        "cpu_workers": cpu_workers,
+        "total_workers": gpu_workers + cpu_workers,
         "active": len(_active_file_ids()),
     })
 
 
 @app.route("/api/workers", methods=["POST"])
 def api_set_workers():
-    """Set the number of workers. +1/-1 or set directly."""
-    global max_workers
+    """Set worker counts. Supports gpu_delta, cpu_delta, or gpu_count/cpu_count."""
+    global gpu_workers, cpu_workers
     data = request.json or {}
-    if "count" in data:
-        max_workers = max(1, min(8, int(data["count"])))
-    elif "delta" in data:
-        max_workers = max(1, min(8, max_workers + int(data["delta"])))
+    if "gpu_count" in data:
+        gpu_workers = max(0, min(4, int(data["gpu_count"])))
+    if "cpu_count" in data:
+        cpu_workers = max(0, min(8, int(data["cpu_count"])))
+    if "gpu_delta" in data:
+        gpu_workers = max(0, min(4, gpu_workers + int(data["gpu_delta"])))
+    if "cpu_delta" in data:
+        cpu_workers = max(0, min(8, cpu_workers + int(data["cpu_delta"])))
+    # Ensure at least 1 total worker
+    if gpu_workers + cpu_workers < 1:
+        gpu_workers = 1
     # If increasing and there's work, spin up more workers
     if encode_queue:
         _start_workers()
-    return jsonify({"ok": True, "max_workers": max_workers, "active": len(_active_file_ids())})
+    return jsonify({
+        "ok": True,
+        "gpu_workers": gpu_workers,
+        "cpu_workers": cpu_workers,
+        "total_workers": gpu_workers + cpu_workers,
+        "active": len(_active_file_ids()),
+    })
 
 
 @app.route("/api/add-folder", methods=["POST"])

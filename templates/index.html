@@ -478,10 +478,15 @@
       <button class="btn btn-outline btn-sm" onclick="rescan()">🔄 Rescan</button>
       <!-- Worker controls -->
       <span style="margin-left:16px;display:inline-flex;align-items:center;gap:6px;font-size:0.85rem;color:var(--text-dim);">
-        Workers:
-        <button class="btn btn-outline btn-sm" onclick="changeWorkers(-1)" style="padding:4px 10px;font-size:1rem;line-height:1;">−</button>
-        <span id="workerCount" style="font-weight:700;color:var(--text);min-width:20px;text-align:center;">1</span>
-        <button class="btn btn-outline btn-sm" onclick="changeWorkers(1)" style="padding:4px 10px;font-size:1rem;line-height:1;">+</button>
+        🖥️ GPU:
+        <button class="btn btn-outline btn-sm" onclick="changeWorkers('gpu',-1)" style="padding:4px 10px;font-size:1rem;line-height:1;">−</button>
+        <span id="gpuCount" style="font-weight:700;color:var(--green);min-width:20px;text-align:center;">1</span>
+        <button class="btn btn-outline btn-sm" onclick="changeWorkers('gpu',1)" style="padding:4px 10px;font-size:1rem;line-height:1;">+</button>
+        &nbsp;
+        🧠 CPU:
+        <button class="btn btn-outline btn-sm" onclick="changeWorkers('cpu',-1)" style="padding:4px 10px;font-size:1rem;line-height:1;">−</button>
+        <span id="cpuCount" style="font-weight:700;color:var(--accent);min-width:20px;text-align:center;">0</span>
+        <button class="btn btn-outline btn-sm" onclick="changeWorkers('cpu',1)" style="padding:4px 10px;font-size:1rem;line-height:1;">+</button>
         <span id="workerStatus" style="font-size:0.75rem;color:var(--green);"></span>
       </span>
     </div>
@@ -737,8 +742,9 @@ function updateStats(s) {
   document.getElementById('cancelAllBtn').style.display = s.is_encoding ? '' : 'none';
   document.getElementById('squishAllBtn').disabled = s.is_encoding;
   // Worker info
-  if (s.workers_max !== undefined) {
-    document.getElementById('workerCount').textContent = s.workers_max;
+  if (s.gpu_workers !== undefined) {
+    document.getElementById('gpuCount').textContent = s.gpu_workers;
+    document.getElementById('cpuCount').textContent = s.cpu_workers;
     const active = s.workers_active || 0;
     document.getElementById('workerStatus').textContent = active > 0 ? `(${active} active)` : '';
   }
@@ -751,15 +757,18 @@ function updateStats(s) {
 }
 
 // -- Workers --
-async function changeWorkers(delta) {
+async function changeWorkers(type, delta) {
   try {
+    const body = {};
+    body[type + '_delta'] = delta;
     const r = await fetch(API + '/api/workers', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({delta})
+      body: JSON.stringify(body)
     });
     const data = await r.json();
-    document.getElementById('workerCount').textContent = data.max_workers;
+    document.getElementById('gpuCount').textContent = data.gpu_workers;
+    document.getElementById('cpuCount').textContent = data.cpu_workers;
   } catch(e) {}
 }
 
