@@ -649,14 +649,18 @@ def _worker(worker_id: int, worker_type: str = "gpu"):
     """Process the encode queue. Each worker pulls one file at a time."""
     while True:
         with encoding_lock:
-            total_target = gpu_workers + cpu_workers
+            # Check if this worker type is over the target count
+            type_target = gpu_workers if worker_type == "gpu" else cpu_workers
+            type_count = sum(1 for w in active_workers.values() if w.get("type") == worker_type)
+            if type_count > type_target:
+                if worker_id in active_workers:
+                    active_workers[worker_id]["file_id"] = None
+                    del active_workers[worker_id]
+                return
+
             if not encode_queue or cancel_event.is_set():
                 if worker_id in active_workers:
                     active_workers[worker_id]["file_id"] = None
-                    # Remove this worker if we're over the limit
-                    if len(active_workers) > total_target:
-                        del active_workers[worker_id]
-                        return
                 cancel_event.clear()
                 return
             file_id = encode_queue.pop(0)
