@@ -40,14 +40,14 @@
   .header h1 { font-size: 1.5rem; font-weight: 700; }
   .header h1 span { color: var(--accent); }
   .header-right { display: flex; gap: 12px; align-items: center; }
-  .hw-badge {
+  .qsv-badge {
     font-size: 0.75rem;
     padding: 4px 10px;
     border-radius: 20px;
     font-weight: 600;
   }
-  .hw-badge.available { background: rgba(52,211,153,0.15); color: var(--green); }
-  .hw-badge.unavailable { background: rgba(248,113,113,0.15); color: var(--red); }
+  .qsv-badge.available { background: rgba(52,211,153,0.15); color: var(--green); }
+  .qsv-badge.unavailable { background: rgba(248,113,113,0.15); color: var(--red); }
 
   /* Layout */
   .container { max-width: 1200px; margin: 0 auto; padding: 24px 32px; }
@@ -129,6 +129,14 @@
   }
   .action-bar-left { display: flex; gap: 10px; align-items: center; }
 
+  /* Checkbox styling */
+  .file-check {
+    width: 18px; height: 18px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .check-col { width: 40px; text-align: center; }
+
   /* File table */
   .file-table-wrap {
     background: var(--surface);
@@ -208,6 +216,78 @@
   .status-error { background: rgba(248,113,113,0.15); color: var(--red); }
   .status-skipped { background: rgba(139,143,163,0.1); color: var(--text-dim); }
   .status-cancelled { background: rgba(251,191,36,0.15); color: var(--orange); }
+
+  /* Folder browser modal */
+  .browser-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+  }
+  .browser-overlay.open { display: flex; }
+  .browser-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    width: 560px;
+    max-width: 95vw;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .browser-panel h2 { margin-bottom: 12px; font-size: 1.15rem; }
+  .browser-breadcrumb {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+    word-break: break-all;
+    padding: 8px 12px;
+    background: var(--surface2);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 36px;
+  }
+  .browser-breadcrumb .path-text { flex: 1; color: var(--accent); font-weight: 600; }
+  .browser-list {
+    flex: 1;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 16px;
+    max-height: 400px;
+  }
+  .browser-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+    transition: background 0.15s;
+  }
+  .browser-item:last-child { border-bottom: none; }
+  .browser-item:hover { background: rgba(124,92,252,0.08); }
+  .browser-item .icon { font-size: 1.1rem; flex-shrink: 0; }
+  .browser-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .browser-empty {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+  }
+  .browser-footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .browser-footer-left { display: flex; gap: 8px; }
 
   /* Settings panel */
   .settings-overlay {
@@ -346,8 +426,10 @@
 <div class="header">
   <h1>🗜️ <span>Squish</span>Box</h1>
   <div class="header-right">
-    <span id="hwBadge" class="hw-badge unavailable">HW: checking…</span>
+    <span id="qsvBadge" class="qsv-badge unavailable">GPU: detecting…</span>
+    <button class="btn btn-outline btn-sm" onclick="openHistory()">📊 History</button>
     <button class="btn btn-outline btn-sm" onclick="openSettings()">⚙️ Settings</button>
+    <button class="btn btn-outline btn-sm" onclick="restartServer()" title="Save state and restart server">🔄 Restart</button>
   </div>
 </div>
 
@@ -356,7 +438,14 @@
   <!-- Folder input -->
   <div class="folder-bar">
     <input type="text" id="folderInput" placeholder="Paste a folder path, e.g. D:\Videos\Movies" autofocus>
+    <button class="btn btn-outline" onclick="openBrowser()">📂 Browse</button>
     <button class="btn btn-primary" id="scanBtn" onclick="scanFolder()">🔍 Scan</button>
+    <button class="btn btn-outline btn-sm" id="addFolderBtn" onclick="addFolder()" style="display:none;" title="Add another folder to the queue">➕ Add Folder</button>
+  </div>
+
+  <!-- Active folders -->
+  <div id="foldersBar" style="display:none;margin-bottom:12px;font-size:0.8rem;color:var(--text-dim);">
+    📁 Scanning: <span id="foldersLabel"></span>
   </div>
 
   <!-- Stats -->
@@ -383,8 +472,18 @@
   <div class="action-bar" id="actionBar" style="display:none;">
     <div class="action-bar-left">
       <button class="btn btn-green" id="squishAllBtn" onclick="squishAll()">🗜️ Squish All</button>
+      <button class="btn btn-primary btn-sm" id="squishSelectedBtn" onclick="squishSelected()" style="display:none;">🗜️ Squish Selected (<span id="selectedCount">0</span>)</button>
       <button class="btn btn-red btn-sm" id="cancelBtn" onclick="cancelEncode()" style="display:none;">⏹ Cancel</button>
+      <button class="btn btn-outline btn-sm" id="cancelAllBtn" onclick="cancelAll()" style="display:none;">🛑 Cancel All</button>
       <button class="btn btn-outline btn-sm" onclick="rescan()">🔄 Rescan</button>
+      <!-- Worker controls -->
+      <span style="margin-left:16px;display:inline-flex;align-items:center;gap:6px;font-size:0.85rem;color:var(--text-dim);">
+        Workers:
+        <button class="btn btn-outline btn-sm" onclick="changeWorkers(-1)" style="padding:4px 10px;font-size:1rem;line-height:1;">−</button>
+        <span id="workerCount" style="font-weight:700;color:var(--text);min-width:20px;text-align:center;">1</span>
+        <button class="btn btn-outline btn-sm" onclick="changeWorkers(1)" style="padding:4px 10px;font-size:1rem;line-height:1;">+</button>
+        <span id="workerStatus" style="font-size:0.75rem;color:var(--green);"></span>
+      </span>
     </div>
     <div style="font-size:0.8rem; color:var(--text-dim);" id="folderLabel"></div>
   </div>
@@ -397,6 +496,46 @@
     </div>
   </div>
 
+</div>
+
+<!-- History overlay -->
+<div class="browser-overlay" id="historyOverlay" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="browser-panel" style="width:800px;">
+    <h2>📊 Encode History</h2>
+    <div style="display:flex;justify-content:space-between;margin-bottom:12px;">
+      <span id="histTotalFiles" style="color:var(--text-dim);font-size:0.85rem;"></span>
+      <span id="histTotalSaved" style="color:var(--green);font-weight:700;"></span>
+    </div>
+    <div class="browser-list" id="historyList" style="max-height:500px;">
+      <div class="browser-empty">Loading…</div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin-top:12px;">
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('historyOverlay').classList.remove('open')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Folder browser overlay -->
+<div class="browser-overlay" id="browserOverlay" onclick="closeBrowserOutside(event)">
+  <div class="browser-panel">
+    <h2>📂 Browse Folders</h2>
+    <div class="browser-breadcrumb">
+      <span class="path-text" id="browserPath">Loading…</span>
+    </div>
+    <div class="browser-list" id="browserList">
+      <div class="browser-empty">Loading…</div>
+    </div>
+    <div class="browser-footer">
+      <div class="browser-footer-left">
+        <button class="btn btn-outline btn-sm" id="browserUpBtn" onclick="browserUp()">⬆️ Up</button>
+        <button class="btn btn-outline btn-sm" onclick="browserHome()">🏠 Drives</button>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-outline btn-sm" onclick="closeBrowser()">Cancel</button>
+        <button class="btn btn-green btn-sm" onclick="browserSelect()">✅ Select This Folder</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Settings overlay -->
@@ -431,20 +570,19 @@
     <div class="setting-group">
       <label>Hardware Encoding</label>
       <select id="setHwMode">
-        <option value="auto" selected>Auto-detect</option>
+        <option value="auto" selected>Auto-detect (recommended)</option>
+        <option value="amf">AMD AMF</option>
         <option value="qsv">Intel QSV</option>
-        <option value="nvenc">Nvidia NVENC</option>
-        <option value="videotoolbox">macOS VideoToolbox</option>
-        <option value="vaapi">Linux VAAPI</option>
-        <option value="cpu">Force CPU (libx265)</option>
+        <option value="nvenc">NVIDIA NVENC</option>
+        <option value="cpu">CPU only (libx265)</option>
       </select>
     </div>
 
     <div class="setting-group">
       <label>Output Naming</label>
       <select id="setOutputMode">
-        <option value="suffix" selected>Add _squished suffix</option>
-        <option value="replace">Replace original</option>
+        <option value="replace" selected>Replace original</option>
+        <option value="suffix">Add _squished suffix</option>
       </select>
     </div>
 
@@ -520,6 +658,8 @@ function startPolling() {
 }
 
 // -- Render files --
+let selectedIds = new Set();
+
 function renderFiles(files) {
   const area = document.getElementById('fileArea');
   if (!files || files.length === 0) {
@@ -528,12 +668,14 @@ function renderFiles(files) {
   }
 
   let html = '<div class="file-table-wrap"><table><thead><tr>';
-  html += '<th>File</th><th>Codec</th><th>Resolution</th><th>Size</th><th>Duration</th><th>Progress</th><th>Status</th><th>Saved</th><th></th>';
+  html += '<th class="check-col"><input type="checkbox" class="file-check" id="selectAll" onclick="toggleSelectAll()" title="Select all"></th>';
+  html += '<th>File</th><th>Codec</th><th>Resolution</th><th>Size</th><th>New Size</th><th>Duration</th><th>Progress</th><th>Status</th><th>Saved</th><th></th>';
   html += '</tr></thead><tbody>';
 
   for (const f of files) {
     const codecClass = (f.codec === 'hevc' || f.codec === 'h265' || f.codec === 'hev1') ? 'codec-hevc' : 'codec-other';
     const statusClass = 'status-' + f.status;
+    const canSelect = (f.status === 'pending' || f.status === 'skipped');
 
     let progressHtml = '';
     if (f.status === 'encoding') {
@@ -547,7 +689,7 @@ function renderFiles(files) {
     } else if (f.status === 'queued') {
       progressHtml = `<span style="color:var(--text-dim);font-size:0.8rem;">Queue #${f.queue_pos}</span>`;
     } else if (f.status === 'error') {
-      progressHtml = `<span style="color:var(--red);font-size:0.75rem;" title="${esc(f.error)}">⚠ ${esc(f.error).substring(0,30)}</span>`;
+      progressHtml = `<span style="color:var(--red);font-size:0.75rem;" title="${esc(f.error)}">⚠ ${esc(f.error).substring(0,80)}</span>`;
     }
 
     const canSquish = f.status === 'pending';
@@ -555,11 +697,17 @@ function renderFiles(files) {
       ? `<button class="btn btn-primary btn-sm" onclick="squishOne('${f.id}')">🗜️</button>`
       : '';
 
+    const checkHtml = canSelect
+      ? `<input type="checkbox" class="file-check" data-id="${f.id}" onclick="toggleCheck('${f.id}', this)" ${selectedIds.has(f.id) ? 'checked' : ''}>`
+      : '';
+
     html += `<tr>
+      <td class="check-col">${checkHtml}</td>
       <td class="fname" title="${esc(f.filename)}">${esc(f.filename)}</td>
       <td><span class="codec-badge ${codecClass}">${esc(f.codec)}</span></td>
       <td>${esc(f.resolution)}</td>
       <td>${esc(f.size_fmt)}</td>
+      <td style="color:${f.new_size_fmt ? 'var(--green)' : 'var(--text-dim)'}">${f.new_size_fmt || '—'}</td>
       <td>${esc(f.duration_fmt)}</td>
       <td>${progressHtml}</td>
       <td><span class="status-badge ${statusClass}">${f.status}</span></td>
@@ -585,12 +733,110 @@ function updateStats(s) {
   isEncoding = s.is_encoding;
   document.getElementById('statStatus').textContent = s.is_encoding ? '🔥 Encoding…' : 'Idle';
   document.getElementById('cancelBtn').style.display = s.is_encoding ? '' : 'none';
+  document.getElementById('cancelAllBtn').style.display = s.is_encoding ? '' : 'none';
   document.getElementById('squishAllBtn').disabled = s.is_encoding;
+  // Worker info
+  if (s.workers_max !== undefined) {
+    document.getElementById('workerCount').textContent = s.workers_max;
+    const active = s.workers_active || 0;
+    document.getElementById('workerStatus').textContent = active > 0 ? `(${active} active)` : '';
+  }
+  // Folders info
+  if (s.folders && s.folders.length > 0) {
+    document.getElementById('foldersBar').style.display = '';
+    document.getElementById('foldersLabel').textContent = s.folders.join(' + ');
+    document.getElementById('addFolderBtn').style.display = '';
+  }
+}
+
+// -- Workers --
+async function changeWorkers(delta) {
+  try {
+    const r = await fetch(API + '/api/workers', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({delta})
+    });
+    const data = await r.json();
+    document.getElementById('workerCount').textContent = data.max_workers;
+  } catch(e) {}
+}
+
+// -- Add Folder (multi-folder scan) --
+async function addFolder() {
+  const folder = document.getElementById('folderInput').value.trim();
+  if (!folder) { alert('Paste a folder path first'); return; }
+  document.getElementById('addFolderBtn').disabled = true;
+  document.getElementById('addFolderBtn').textContent = '⏳ Adding…';
+  try {
+    const r = await fetch(API + '/api/add-folder', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({folder})
+    });
+    const data = await r.json();
+    if (data.error) { alert(data.error); return; }
+    if (data.folders) {
+      document.getElementById('foldersBar').style.display = '';
+      document.getElementById('foldersLabel').textContent = data.folders.join(' + ');
+    }
+    refreshFiles();
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  } finally {
+    document.getElementById('addFolderBtn').disabled = false;
+    document.getElementById('addFolderBtn').textContent = '➕ Add Folder';
+  }
 }
 
 // -- Actions --
 async function squishAll() {
   await fetch(API + '/api/squish-all', {method: 'POST'});
+  refreshFiles();
+}
+
+function getSelectedIds() {
+  return Array.from(selectedIds);
+}
+
+function toggleCheck(id, el) {
+  if (el.checked) {
+    selectedIds.add(id);
+  } else {
+    selectedIds.delete(id);
+  }
+  updateSelectedCount();
+}
+
+function updateSelectedCount() {
+  const btn = document.getElementById('squishSelectedBtn');
+  document.getElementById('selectedCount').textContent = selectedIds.size;
+  btn.style.display = selectedIds.size > 0 ? '' : 'none';
+}
+
+function toggleSelectAll() {
+  const selectAll = document.getElementById('selectAll');
+  document.querySelectorAll('.file-check[data-id]').forEach(cb => {
+    if (selectAll.checked) {
+      selectedIds.add(cb.dataset.id);
+    } else {
+      selectedIds.delete(cb.dataset.id);
+    }
+    cb.checked = selectAll.checked;
+  });
+  updateSelectedCount();
+}
+
+async function squishSelected() {
+  const ids = getSelectedIds();
+  if (ids.length === 0) return;
+  selectedIds.clear();
+  updateSelectedCount();
+  await fetch(API + '/api/squish-selected', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids})
+  });
   refreshFiles();
 }
 
@@ -607,6 +853,35 @@ async function cancelEncode() {
   if (!confirm('Cancel encoding? Current file will be stopped and queue cleared.')) return;
   await fetch(API + '/api/cancel', {method: 'POST'});
   refreshFiles();
+}
+
+async function cancelAll() {
+  if (!confirm('Cancel all jobs and reset everything to pending?')) return;
+  await fetch(API + '/api/cancel-all', {method: 'POST'});
+  refreshFiles();
+}
+
+async function restartServer() {
+  if (!confirm('Restart SquishBox? State is saved — your scan will be restored.')) return;
+  try {
+    await fetch(API + '/api/restart', {method: 'POST'});
+  } catch(e) {}
+  document.getElementById('fileArea').innerHTML = '<div class="empty-state"><div class="icon">🔄</div><p>Restarting... please wait</p></div>';
+  let attempts = 0;
+  const check = setInterval(async () => {
+    attempts++;
+    try {
+      const r = await fetch(API + '/api/settings');
+      if (r.ok) {
+        clearInterval(check);
+        location.reload();
+      }
+    } catch(e) {}
+    if (attempts > 15) {
+      clearInterval(check);
+      document.getElementById('fileArea').innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Server didn\'t come back. Restart manually.</p></div>';
+    }
+  }, 2000);
 }
 
 async function rescan() {
@@ -629,16 +904,13 @@ async function loadSettings() {
     else del.classList.remove('on');
     updateQualityLabel();
 
-    const badge = document.getElementById('hwBadge');
-    if (s.hw_encoders) {
-      const avail = Object.entries(s.hw_encoders).filter(([k,v]) => v).map(([k]) => k.toUpperCase());
-      if (avail.length > 0) {
-        badge.textContent = 'HW: ' + avail.join(', ') + ' → ' + (s.active_encoder || 'cpu');
-        badge.className = 'hw-badge available';
-      } else {
-        badge.textContent = 'HW: CPU only (no GPU encoder found)';
-        badge.className = 'hw-badge unavailable';
-      }
+    const badge = document.getElementById('qsvBadge');
+    if (s.gpu_encoder && s.gpu_encoder !== 'none') {
+      badge.textContent = 'GPU: ✓ ' + s.gpu_label;
+      badge.className = 'qsv-badge available';
+    } else {
+      badge.textContent = 'GPU: ✗ CPU only';
+      badge.className = 'qsv-badge unavailable';
     }
   } catch(e) {}
 }
@@ -682,8 +954,148 @@ async function saveSettings() {
   closeSettings();
 }
 
-// Init
+// -- Folder Browser --
+let browserCurrentPath = '';
+
+async function openBrowser() {
+  document.getElementById('browserOverlay').classList.add('open');
+  // Start at whatever's in the input, or drives/root
+  const inputPath = document.getElementById('folderInput').value.trim();
+  await browserNavigate(inputPath || '');
+}
+
+function closeBrowser() {
+  document.getElementById('browserOverlay').classList.remove('open');
+}
+
+function closeBrowserOutside(e) {
+  if (e.target === document.getElementById('browserOverlay')) closeBrowser();
+}
+
+async function browserNavigate(path) {
+  const list = document.getElementById('browserList');
+  list.innerHTML = '<div class="browser-empty">Loading…</div>';
+  document.getElementById('browserPath').textContent = path || 'My Computer';
+
+  try {
+    const r = await fetch(API + '/api/browse', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path})
+    });
+    const data = await r.json();
+    if (data.error) {
+      list.innerHTML = `<div class="browser-empty">⚠️ ${esc(data.error)}</div>`;
+      return;
+    }
+
+    browserCurrentPath = data.current;
+    document.getElementById('browserPath').textContent = data.current || 'My Computer';
+    document.getElementById('browserUpBtn').disabled = !data.parent && !data.current;
+
+    if (data.items.length === 0) {
+      list.innerHTML = '<div class="browser-empty">No subfolders here.<br>Click "Select This Folder" to use this one.</div>';
+      return;
+    }
+
+    let html = '';
+    for (const item of data.items) {
+      const icon = item.type === 'drive' ? '💾' : '📁';
+      html += `<div class="browser-item" onclick="browserNavigate('${esc(item.path).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}')">
+        <span class="icon">${icon}</span>
+        <span class="name">${esc(item.name)}</span>
+      </div>`;
+    }
+    list.innerHTML = html;
+  } catch (e) {
+    list.innerHTML = `<div class="browser-empty">⚠️ ${e.message}</div>`;
+  }
+}
+
+async function browserUp() {
+  if (!browserCurrentPath) return;
+  // Go up one level
+  const r = await fetch(API + '/api/browse', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: browserCurrentPath})
+  });
+  const data = await r.json();
+  if (data.parent) {
+    await browserNavigate(data.parent);
+  } else {
+    await browserNavigate('');
+  }
+}
+
+function browserHome() {
+  browserNavigate('');
+}
+
+function browserSelect() {
+  if (browserCurrentPath) {
+    document.getElementById('folderInput').value = browserCurrentPath;
+  }
+  closeBrowser();
+}
+
+// -- History --
+async function openHistory() {
+  document.getElementById('historyOverlay').classList.add('open');
+  const list = document.getElementById('historyList');
+  list.innerHTML = '<div class="browser-empty">Loading…</div>';
+  try {
+    const r = await fetch(API + '/api/history');
+    const data = await r.json();
+    document.getElementById('histTotalFiles').textContent = data.total_files + ' files processed';
+    document.getElementById('histTotalSaved').textContent = 'Total saved: ' + data.total_saved_fmt;
+
+    if (!data.history || data.history.length === 0) {
+      list.innerHTML = '<div class="browser-empty">No history yet. Squish some files!</div>';
+      return;
+    }
+
+    let html = '<table style="width:100%;"><thead><tr>';
+    html += '<th>File</th><th>Original</th><th>New</th><th>Saved</th><th>Ratio</th><th>Date</th>';
+    html += '</tr></thead><tbody>';
+    for (const h of data.history) {
+      html += `<tr>
+        <td class="fname" title="${esc(h.filename)}" style="max-width:250px;">${esc(h.filename)}</td>
+        <td>${esc(h.original_size_fmt)}</td>
+        <td style="color:var(--green)">${esc(h.new_size_fmt)}</td>
+        <td class="saved">-${esc(h.space_saved_fmt)}</td>
+        <td style="color:var(--accent);font-weight:600;">${esc(h.ratio)}</td>
+        <td style="color:var(--text-dim);font-size:0.8rem;">${esc(h.timestamp)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    list.innerHTML = html;
+  } catch (e) {
+    list.innerHTML = `<div class="browser-empty">⚠️ ${e.message}</div>`;
+  }
+}
+
+// Init — auto-restore last scan on page load
 loadSettings();
+(async function() {
+  try {
+    const r = await fetch(API + '/api/files');
+    const data = await r.json();
+    console.log('Auto-restore:', data.folder, data.files ? data.files.length + ' files' : 'no files');
+    if (data.folder && data.files && data.files.length > 0) {
+      document.getElementById('folderInput').value = data.folder;
+      document.getElementById('statsBar').style.display = '';
+      document.getElementById('actionBar').style.display = '';
+      document.getElementById('folderLabel').textContent = data.folder;
+      currentFiles = data.files;
+      renderFiles(data.files);
+      updateStats(data.stats);
+      startPolling();
+    }
+  } catch(e) {
+    console.error('Auto-restore failed:', e);
+  }
+})();
 </script>
 </body>
 </html>

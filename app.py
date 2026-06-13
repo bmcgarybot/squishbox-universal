@@ -3,9 +3,11 @@ SquishBox — Point at a folder, click squish, watch files shrink.
 A simple batch video transcoder with a web UI. FFmpeg under the hood.
 """
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -13,6 +15,11 @@ import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
+
+# Add local lib folder so pythonw can find Flask
+_lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+if os.path.isdir(_lib) and _lib not in sys.path:
+    sys.path.insert(0, _lib)
 
 from flask import Flask, jsonify, render_template, request
 
@@ -28,9 +35,10 @@ settings = {
     "quality": 23,           # CRF / global_quality value
     "max_resolution": 1080,  # 0 = no limit (4K), 1080, 720
     "container": "mkv",      # mkv or mp4
-    "hw_mode": "auto",       # auto / qsv / nvenc / videotoolbox / vaapi / cpu
+    "hw_mode": "auto",       # auto / amf / qsv / nvenc / cpu
     "delete_originals": False,
-    "output_mode": "suffix", # suffix (_squished) or replace
+    "output_mode": "replace", # suffix (_squished) or replace
+    "min_file_size_mb": 10,  # skip files smaller than this (filters out NFO/info junk)
 }
 
 # Scanned files: {file_id: {path, filename, codec, resolution, width, height,
@@ -39,12 +47,53 @@ settings = {
 scanned_files: OrderedDict[str, dict] = OrderedDict()
 scan_folder: str = ""
 
+# State file for persistence across restarts
+_state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".state.json")
+
+
+def _save_state():
+    """Persist scan state to disk."""
+    try:
+        state = {
+            "scan_folder": scan_folder,
+            "scanned_files": {k: {kk: vv for kk, vv in v.items()} for k, v in scanned_files.items()},
+            "stats": stats,
+        }
+        with open(_state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except OSError:
+        pass
+
+
+def _load_state():
+    """Restore scan state from disk on startup."""
+    global scan_folder, scanned_files, stats
+    try:
+        with open(_state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        scan_folder = state.get("scan_folder", "")
+        for k, v in state.get("scanned_files", {}).items():
+            scanned_files[k] = v
+            # Reset any in-progress states from previous run
+            if v.get("status") in ("encoding", "queued"):
+                scanned_files[k]["status"] = "pending"
+                scanned_files[k]["progress"] = 0
+                scanned_files[k]["queue_pos"] = 0
+        stats.update(state.get("stats", {}))
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+
+
 # Queue / encoding state
 encode_queue: list[str] = []       # file_ids waiting
-current_encode_id: str | None = None
 encoding_lock = threading.Lock()
-encode_thread: threading.Thread | None = None
 cancel_event = threading.Event()
+
+# Multi-worker pool
+max_workers: int = 1               # configurable worker count
+active_workers: dict[int, dict] = {}  # {worker_id: {"thread": Thread, "file_id": str|None}}
+_next_worker_id: int = 0
+scan_folders: list[str] = []       # all scanned folder paths
 
 # Stats
 stats = {
@@ -52,8 +101,8 @@ stats = {
     "files_processed": 0,
 }
 
-# QSV availability cache
-_hw_encoders: dict | None = None
+# QSV/AMF/NVENC availability cache
+_hw_encoder: str | None = None  # Will be set to the working GPU encoder
 
 
 # ---------------------------------------------------------------------------
@@ -69,86 +118,128 @@ def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, startupinfo=si, **kwargs)
 
 
-def detect_hw_encoders() -> dict:
-    """Detect all available HEVC hardware encoders.
+def detect_gpu_encoder() -> str | None:
+    """Detect the best available GPU encoder by actually testing each one."""
+    global _hw_encoder
+    if _hw_encoder is not None:
+        return _hw_encoder if _hw_encoder != "" else None
 
-    Returns dict like:
-        {"qsv": True, "nvenc": False, "videotoolbox": True, "vaapi": False}
-    """
-    global _hw_encoders
-    if _hw_encoders is not None:
-        return _hw_encoders
+    # Order: AMD AMF → Intel QSV → NVIDIA NVENC
+    candidates = [
+        ("hevc_amf", ["-global_quality", "23"]),
+        ("hevc_qsv", ["-global_quality", "23"]),
+        ("hevc_nvenc", ["-rc", "constqp", "-qp", "23"]),
+    ]
 
-    encoder_map = {
-        "qsv": "hevc_qsv",           # Intel Quick Sync
-        "nvenc": "hevc_nvenc",         # Nvidia NVENC
-        "videotoolbox": "hevc_videotoolbox",  # macOS
-        "vaapi": "hevc_vaapi",         # Linux AMD/Intel
-    }
+    for encoder, _ in candidates:
+        try:
+            # Quick test: encode 1 frame of black to verify the encoder works
+            cmd = [
+                "ffmpeg", "-y", "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
+                "-c:v", encoder, "-frames:v", "1",
+                "-f", "null", "-",
+            ]
+            r = _run(cmd, capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                _hw_encoder = encoder
+                return _hw_encoder
+        except Exception:
+            continue
 
-    _hw_encoders = {k: False for k in encoder_map}
-    try:
-        r = _run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
-            capture_output=True, text=True, timeout=10,
-        )
-        for key, enc_name in encoder_map.items():
-            if enc_name in r.stdout:
-                _hw_encoders[key] = True
-    except Exception:
-        pass
-    return _hw_encoders
-
-
-def _best_hw_encoder() -> str | None:
-    """Return the best available HW encoder name, or None for CPU.
-
-    Priority: nvenc > qsv > videotoolbox > vaapi
-    (nvenc is fastest, qsv is most common, vtb for Mac, vaapi for Linux)
-    """
-    hw = detect_hw_encoders()
-    priority = ["nvenc", "qsv", "videotoolbox", "vaapi"]
-    for p in priority:
-        if hw.get(p):
-            return p
+    _hw_encoder = ""  # empty string = tested but nothing works
     return None
+
+
+def probe_file(filepath: str) -> dict | None:
+    """Return dict with codec, width, height, duration, size or None on error."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "quiet",
+            "-print_format", "json",
+            "-show_format", "-show_streams",
+            str(filepath),
+        ]
+        r = _run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return None
+        data = json.loads(r.stdout)
+
+        # Find video stream
+        video = None
+        for s in data.get("streams", []):
+            if s.get("codec_type") == "video":
+                video = s
+                break
+        if not video:
+            return None
+
+        fmt = data.get("format", {})
+        duration = float(fmt.get("duration", 0) or video.get("duration", 0) or 0)
+        size = int(fmt.get("size", 0))
+        codec = (video.get("codec_name") or "unknown").lower()
+        width = int(video.get("width", 0))
+        height = int(video.get("height", 0))
+
+        return {
+            "codec": codec,
+            "width": width,
+            "height": height,
+            "duration": duration,
+            "size": size,
+        }
+    except Exception:
+        return None
 
 
 def _choose_encoder() -> tuple[str, list[str]]:
     """Return (encoder_name, extra_ffmpeg_args) based on settings and availability."""
     mode = settings["hw_mode"]
     quality = settings["quality"]
-    hw = detect_hw_encoders()
 
-    # Map hw_mode to encoder name + args
-    encoder_configs = {
-        "qsv": ("hevc_qsv", ["-global_quality", str(quality), "-preset", "medium"]),
-        "nvenc": ("hevc_nvenc", ["-cq", str(quality), "-preset", "p4", "-tune", "hq"]),
-        "videotoolbox": ("hevc_videotoolbox", ["-q:v", str(max(30, quality * 1.3))]),
-        "vaapi": ("hevc_vaapi", ["-qp", str(quality)]),
-        "cpu": ("libx265", ["-crf", str(quality), "-preset", "medium"]),
-    }
+    gpu_enc = detect_gpu_encoder()
 
-    if mode == "auto":
-        best = _best_hw_encoder()
-        if best:
-            return encoder_configs[best]
-        return encoder_configs["cpu"]
+    if mode == "cpu" or (mode == "auto" and not gpu_enc):
+        return "libx265", ["-crf", str(quality), "-preset", "medium"]
 
-    if mode in encoder_configs and mode != "cpu":
-        if hw.get(mode, False):
-            return encoder_configs[mode]
-        # Requested HW not available, fall back to CPU
-        return encoder_configs["cpu"]
+    if mode == "auto" and gpu_enc:
+        enc = gpu_enc
+    elif mode == "qsv":
+        enc = "hevc_qsv"
+    elif mode == "amf":
+        enc = "hevc_amf"
+    elif mode == "nvenc":
+        enc = "hevc_nvenc"
+    else:
+        enc = gpu_enc or "libx265"
 
-    return encoder_configs["cpu"]
+    # Encoder-specific quality args
+    if enc == "hevc_amf":
+        return enc, ["-quality", "quality", "-rc", "cqp", "-qp_i", str(quality), "-qp_p", str(quality)]
+    elif enc == "hevc_qsv":
+        return enc, ["-global_quality", str(quality), "-preset", "medium"]
+    elif enc == "hevc_nvenc":
+        return enc, ["-rc", "constqp", "-qp", str(quality), "-preset", "p4"]
+    else:
+        return "libx265", ["-crf", str(quality), "-preset", "medium"]
 
 
-def _build_ffmpeg_cmd(src: str, dst: str) -> list[str]:
-    """Build the full ffmpeg command for encoding one file."""
+# Containers that support HEVC
+HEVC_CONTAINERS = {"mkv", "mp4", "mov", "ts", "webm", "m2ts"}
+
+
+def _build_ffmpeg_cmd(src: str, dst: str, simple_mode: bool = False) -> list[str]:
+    """Build the full ffmpeg command for encoding one file.
+    
+    If simple_mode=True, only maps video+audio (skips subtitles and extra streams)
+    to avoid compatibility issues with legacy containers.
+    """
     encoder, enc_args = _choose_encoder()
     max_h = settings["max_resolution"]
-    container = settings["container"]
+
+    # Determine output container from the destination file extension
+    container = Path(dst).suffix.lstrip(".").lower()
+    if container not in HEVC_CONTAINERS:
+        container = "mkv"
 
     # Probe source for resolution
     info = probe_file(src)
@@ -166,15 +257,21 @@ def _build_ffmpeg_cmd(src: str, dst: str) -> list[str]:
     # Audio: copy
     cmd += ["-c:a", "copy"]
 
-    # Subtitles: copy all (MKV supports all subtitle formats; MP4 is limited)
-    if container == "mkv":
-        cmd += ["-c:s", "copy"]
+    if simple_mode:
+        # Simple mode: only video + audio, skip subtitles and data streams
+        cmd += ["-map", "0:v:0", "-map", "0:a?"]
     else:
-        # MP4 only supports mov_text; try to copy, ffmpeg will drop incompatible
-        cmd += ["-c:s", "mov_text"]
+        # Full mode: map everything, preserve all metadata
+        # Subtitles: copy all (MKV supports all subtitle formats; MP4 is limited)
+        if container == "mkv":
+            cmd += ["-c:s", "copy"]
+        else:
+            cmd += ["-c:s", "mov_text"]
+        # Map video, audio, subtitles, and attachments (fonts, thumbnails, etc.)
+        cmd += ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?"]
 
-    # Map all streams
-    cmd += ["-map", "0"]
+    # Always preserve metadata and chapters from source
+    cmd += ["-map_metadata", "0", "-map_chapters", "0"]
 
     # Output
     cmd.append(str(dst))
@@ -184,11 +281,20 @@ def _build_ffmpeg_cmd(src: str, dst: str) -> list[str]:
 def _output_path(src: str) -> str:
     """Compute output file path based on settings."""
     p = Path(src)
-    ext = f".{settings['container']}"
     if settings["output_mode"] == "replace":
-        # Write to temp, then replace after success
-        return str(p.with_suffix(ext + ".tmp"))
+        # If source container can't hold HEVC, switch to MKV
+        src_ext = p.suffix.lstrip(".").lower()
+        if src_ext in HEVC_CONTAINERS:
+            out_ext = p.suffix  # keep original extension
+        else:
+            out_ext = ".mkv"   # upgrade to MKV
+        # Use system temp dir (usually on C:) so we don't fill the source drive
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        temp_name = p.stem + ".squishbox" + out_ext
+        return os.path.join(temp_dir, temp_name)
     else:
+        ext = f".{settings['container']}"
         stem = p.stem
         # Remove existing _squished suffix to avoid stacking
         stem = re.sub(r"_squished$", "", stem)
@@ -196,11 +302,15 @@ def _output_path(src: str) -> str:
 
 
 def _final_path(src: str, tmp_path: str) -> str:
-    """If replace mode, return the final path (original name, new ext)."""
+    """If replace mode, return the final path (original name, appropriate ext)."""
     if settings["output_mode"] == "replace":
         p = Path(src)
-        ext = f".{settings['container']}"
-        return str(p.with_suffix(ext))
+        src_ext = p.suffix.lstrip(".").lower()
+        if src_ext in HEVC_CONTAINERS:
+            return src  # same filename
+        else:
+            # Can't use original extension (e.g. .avi), switch to .mkv
+            return str(p.with_suffix(".mkv"))
     return tmp_path
 
 
@@ -208,29 +318,51 @@ def _final_path(src: str, tmp_path: str) -> str:
 # Scanning
 # ---------------------------------------------------------------------------
 
-def scan_directory(folder: str) -> dict:
-    """Scan folder for video files and populate scanned_files."""
-    global scan_folder, scanned_files
+def scan_directory(folder: str, append: bool = False) -> dict:
+    """Scan folder for video files and populate scanned_files.
+    If append=True, adds to existing scan instead of clearing."""
+    global scan_folder
     scan_folder = folder
-    scanned_files.clear()
+
+    if not append:
+        scanned_files.clear()
+        scan_folders.clear()
+
+    if folder not in scan_folders:
+        scan_folders.append(folder)
 
     folder_path = Path(folder)
     if not folder_path.is_dir():
         return {"error": f"Not a valid directory: {folder}"}
 
     files_found = []
-    for f in sorted(folder_path.iterdir()):
+    min_bytes = settings["min_file_size_mb"] * 1024 * 1024  # convert MB to bytes
+    for f in sorted(folder_path.rglob("*")):
         if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS:
+            # Skip tiny files (NFO, info stubs, samples)
+            try:
+                if f.stat().st_size < min_bytes:
+                    continue
+            except OSError:
+                continue
             files_found.append(f)
 
     for f in files_found:
         info = probe_file(str(f))
-        fid = uuid.uuid4().hex[:8]
+        # Use path-based ID so rescans don't create duplicate entries
+        fid = hashlib.md5(str(f).encode()).hexdigest()[:8]
         already_target = False
         if info:
             is_hevc = info["codec"] in ("hevc", "h265", "hev1")
-            is_target_container = f.suffix.lower() == f".{settings['container']}"
-            already_target = is_hevc and is_target_container
+            max_h = settings["max_resolution"]
+            # In replace mode, container doesn't matter for skip logic
+            if settings["output_mode"] == "replace":
+                is_target_container = True
+            else:
+                is_target_container = f.suffix.lower() == f".{settings['container']}"
+            # Don't skip if resolution exceeds max (user wants to downscale)
+            needs_downscale = max_h and info["height"] > max_h
+            already_target = is_hevc and is_target_container and not needs_downscale
 
         scanned_files[fid] = {
             "id": fid,
@@ -247,10 +379,12 @@ def scan_directory(folder: str) -> dict:
             "speed_fps": 0,
             "eta": "",
             "space_saved": 0,
+            "new_size": 0,
             "error": "",
             "queue_pos": 0,
         }
 
+    _save_state()
     return {"count": len(scanned_files)}
 
 
@@ -287,23 +421,9 @@ def _parse_progress(line: str, duration: float) -> dict:
     return result
 
 
-def _encode_one(file_id: str):
-    """Encode a single file. Runs in the worker thread."""
-    global current_encode_id
-    current_encode_id = file_id
-    entry = scanned_files.get(file_id)
-    if not entry:
-        return
-
-    src = entry["path"]
-    dst = _output_path(src)
-    entry["status"] = "encoding"
-    entry["progress"] = 0
-
-    cmd = _build_ffmpeg_cmd(src, dst)
-    duration = entry["duration"]
+def _run_ffmpeg(cmd, entry, duration, dst):
+    """Run an FFmpeg command, tracking progress. Returns (success, error_lines)."""
     start_real = time.time()
-
     try:
         si = None
         if sys.platform == "win32":
@@ -321,28 +441,30 @@ def _encode_one(file_id: str):
         )
 
         buf = ""
+        last_lines = []
         while True:
             if cancel_event.is_set():
                 proc.kill()
                 entry["status"] = "cancelled"
-                # Clean up partial output
                 try:
                     os.remove(dst)
                 except OSError:
                     pass
-                return
+                return False, ["Cancelled"]
 
             ch = proc.stderr.read(1)
             if not ch:
                 break
             if ch in ("\r", "\n"):
                 if buf.strip():
+                    last_lines.append(buf.strip())
+                    if len(last_lines) > 20:
+                        last_lines.pop(0)
                     info = _parse_progress(buf, duration)
                     if "progress" in info:
                         entry["progress"] = info["progress"]
                     if "fps" in info:
                         entry["speed_fps"] = round(info["fps"], 1)
-                    # Compute ETA
                     if "elapsed_video_sec" in info and info["elapsed_video_sec"] > 0:
                         elapsed_real = time.time() - start_real
                         ratio = info["elapsed_video_sec"] / elapsed_real if elapsed_real > 0 else 1
@@ -362,66 +484,173 @@ def _encode_one(file_id: str):
         proc.wait()
 
         if proc.returncode != 0:
-            entry["status"] = "error"
-            entry["error"] = f"FFmpeg exited with code {proc.returncode}"
             try:
                 os.remove(dst)
             except OSError:
                 pass
-            return
+            return False, last_lines
 
-        # Success
-        entry["progress"] = 100
-        entry["status"] = "done"
-
-        # Handle replace mode
-        final_dst = _final_path(src, dst)
-        if settings["output_mode"] == "replace" and dst != final_dst:
-            # Remove original, rename temp to final
-            try:
-                os.remove(src)
-            except OSError:
-                pass
-            try:
-                os.rename(dst, final_dst)
-            except OSError:
-                entry["error"] = "Encoded OK but failed to replace original"
-
-        # Calculate space saved
-        try:
-            new_size = os.path.getsize(final_dst)
-            saved = entry["size"] - new_size
-            entry["space_saved"] = saved
-            stats["total_space_saved"] += max(saved, 0)
-        except OSError:
-            pass
-
-        stats["files_processed"] += 1
-
-        # Delete original if setting enabled (suffix mode)
-        if settings["delete_originals"] and settings["output_mode"] == "suffix":
-            try:
-                os.remove(src)
-            except OSError:
-                pass
+        return True, last_lines
 
     except Exception as e:
-        entry["status"] = "error"
-        entry["error"] = str(e)
         try:
             os.remove(dst)
         except OSError:
             pass
+        return False, [str(e)]
 
 
-def _worker():
-    """Process the encode queue one at a time."""
-    global current_encode_id, encode_thread
+def _encode_one(file_id: str, worker_id: int):
+    """Encode a single file with automatic fallbacks:
+    1. GPU encoder (AMF/QSV/NVENC) → 2. GPU simple mode → 3. CPU → 4. CPU simple mode
+    """
+    if worker_id in active_workers:
+        active_workers[worker_id]["file_id"] = file_id
+    entry = scanned_files.get(file_id)
+    if not entry:
+        return
+
+    src = entry["path"]
+
+    # Pre-encode safety: re-probe file to catch duplicates already converted
+    if os.path.isfile(src):
+        recheck = probe_file(src)
+        if recheck and recheck["codec"] in ("hevc", "h265", "hev1"):
+            max_h = settings["max_resolution"]
+            needs_downscale = max_h and recheck["height"] > max_h
+            if not needs_downscale:
+                entry["status"] = "skipped"
+                entry["error"] = "Already HEVC (skipped duplicate)"
+                if worker_id in active_workers:
+                    active_workers[worker_id]["file_id"] = None
+                return
+    elif not os.path.isfile(src):
+        entry["status"] = "error"
+        entry["error"] = "File not found"
+        if worker_id in active_workers:
+            active_workers[worker_id]["file_id"] = None
+        return
+
+    dst = _output_path(src)
+    entry["status"] = "encoding"
+    entry["progress"] = 0
+
+    duration = entry["duration"]
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_encode.log")
+
+    attempts = []
+    success = False
+    err_lines = []
+
+    # Build list of attempts: GPU full → GPU simple → CPU full → CPU simple
+    gpu_enc = detect_gpu_encoder()
+    if settings["hw_mode"] != "cpu" and gpu_enc:
+        attempts.append(("GPU", False))
+        attempts.append(("GPU", True))
+    attempts.append(("CPU", False))
+    attempts.append(("CPU", True))
+
+    for attempt_label, simple_mode in attempts:
+        if cancel_event.is_set():
+            break
+
+        entry["progress"] = 0
+        entry["speed_fps"] = 0
+
+        if attempt_label == "CPU":
+            old_hw = settings["hw_mode"]
+            settings["hw_mode"] = "cpu"
+            cmd = _build_ffmpeg_cmd(src, dst, simple_mode=simple_mode)
+            settings["hw_mode"] = old_hw
+            mode_desc = f"CPU {'simple' if simple_mode else 'full'}"
+        else:
+            cmd = _build_ffmpeg_cmd(src, dst, simple_mode=simple_mode)
+            mode_desc = f"GPU {'simple' if simple_mode else 'full'}"
+
+        entry["eta"] = mode_desc
+
+        success, err_lines = _run_ffmpeg(cmd, entry, duration, dst)
+
+        if success:
+            break
+
+    # Write log
+    try:
+        with open(log_path, "w", encoding="utf-8") as lf:
+            lf.write(f"Source: {src}\n")
+            lf.write(f"Destination: {dst}\n")
+            lf.write(f"GPU encoder: {gpu_enc or 'none'}\n")
+            lf.write(f"Last command: {' '.join(cmd)}\n")
+            lf.write(f"Success: {success}\n\n")
+            lf.write("--- FFmpeg output ---\n")
+            for line in err_lines:
+                lf.write(line + "\n")
+    except OSError:
+        pass
+
+    if not success:
+        entry["status"] = "error"
+        error_lines = [l for l in err_lines if not l.startswith("frame=") and not l.startswith("size=")]
+        err_detail = " | ".join(error_lines[-5:]) if error_lines else "unknown error"
+        entry["error"] = err_detail[:300]
+        return
+
+    # Success
+    entry["progress"] = 100
+    entry["status"] = "done"
+
+    # Handle replace mode
+    final_dst = _final_path(src, dst)
+    if settings["output_mode"] == "replace" and dst != final_dst:
+        # Delete original first to free space on the target drive
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+        # Move temp to final (shutil.move handles cross-drive moves)
+        try:
+            shutil.move(dst, final_dst)
+        except OSError:
+            entry["error"] = "Encoded OK but failed to replace original"
+
+    # Calculate space saved
+    try:
+        new_size = os.path.getsize(final_dst)
+        saved = entry["size"] - new_size
+        entry["space_saved"] = saved
+        entry["new_size"] = new_size
+        stats["total_space_saved"] += max(saved, 0)
+    except OSError:
+        new_size = 0
+        pass
+
+    stats["files_processed"] += 1
+
+    # Save to job history
+    _save_history_entry(entry, new_size)
+
+    # Persist state to disk
+    _save_state()
+
+    # Delete original if setting enabled (suffix mode)
+    if settings["delete_originals"] and settings["output_mode"] == "suffix":
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+
+
+def _worker(worker_id: int):
+    """Process the encode queue. Each worker pulls one file at a time."""
     while True:
         with encoding_lock:
             if not encode_queue or cancel_event.is_set():
-                current_encode_id = None
-                encode_thread = None
+                if worker_id in active_workers:
+                    active_workers[worker_id]["file_id"] = None
+                    # Remove this worker if we're over the limit
+                    if len(active_workers) > max_workers:
+                        del active_workers[worker_id]
+                        return
                 cancel_event.clear()
                 return
             file_id = encode_queue.pop(0)
@@ -430,7 +659,7 @@ def _worker():
                 if qid in scanned_files:
                     scanned_files[qid]["queue_pos"] = i + 1
 
-        _encode_one(file_id)
+        _encode_one(file_id, worker_id)
 
         if cancel_event.is_set():
             # Mark remaining as pending
@@ -440,22 +669,37 @@ def _worker():
                         scanned_files[qid]["status"] = "pending"
                         scanned_files[qid]["queue_pos"] = 0
                 encode_queue.clear()
-                current_encode_id = None
-                encode_thread = None
+                if worker_id in active_workers:
+                    active_workers[worker_id]["file_id"] = None
                 cancel_event.clear()
             return
 
 
-def _start_worker():
-    """Start the worker thread if not already running."""
-    global encode_thread
-    if encode_thread is None or not encode_thread.is_alive():
-        cancel_event.clear()
-        encode_thread = threading.Thread(target=_worker, daemon=True)
-        encode_thread.start()
+def _start_workers():
+    """Ensure the right number of worker threads are running."""
+    global _next_worker_id
+    # Clean up dead workers
+    dead = [wid for wid, w in active_workers.items() if not w["thread"].is_alive()]
+    for wid in dead:
+        del active_workers[wid]
+
+    # Spin up workers to match max_workers (if there's work to do)
+    cancel_event.clear()
+    while len(active_workers) < max_workers and encode_queue:
+        wid = _next_worker_id
+        _next_worker_id += 1
+        t = threading.Thread(target=_worker, args=(wid,), daemon=True)
+        active_workers[wid] = {"thread": t, "file_id": None}
+        t.start()
 
 
 # ---------------------------------------------------------------------------
+
+def _active_file_ids() -> set:
+    """Return set of file_ids currently being encoded by workers."""
+    return {w["file_id"] for w in active_workers.values() if w["file_id"]}
+
+
 # Format helpers
 # ---------------------------------------------------------------------------
 
@@ -484,6 +728,43 @@ def fmt_duration(sec: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Job History
+# ---------------------------------------------------------------------------
+
+_history_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.json")
+
+
+def _load_history() -> list:
+    try:
+        with open(_history_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _save_history_entry(entry: dict, new_size: int):
+    history = _load_history()
+    history.insert(0, {
+        "filename": entry["filename"],
+        "path": entry["path"],
+        "codec": entry["codec"],
+        "resolution": entry["resolution"],
+        "original_size": entry["size"],
+        "new_size": new_size,
+        "space_saved": entry.get("space_saved", 0),
+        "duration": entry.get("duration", 0),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    # Keep last 500 entries
+    history = history[:500]
+    try:
+        with open(_history_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -492,25 +773,75 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/browse", methods=["POST"])
+def api_browse():
+    """List drives (if no path) or subdirectories of a given path."""
+    data = request.json or {}
+    target = data.get("path", "").strip()
+
+    # No path → list drives on Windows, root on Unix
+    if not target:
+        if sys.platform == "win32":
+            import string
+            drives = []
+            for letter in string.ascii_uppercase:
+                dp = f"{letter}:\\"
+                if os.path.isdir(dp):
+                    drives.append({"name": f"{letter}:", "path": dp, "type": "drive"})
+            return jsonify({"items": drives, "current": "", "parent": ""})
+        else:
+            target = "/"
+
+    target_path = Path(target)
+    if not target_path.is_dir():
+        return jsonify({"error": f"Not a directory: {target}"}), 400
+
+    items = []
+    try:
+        for entry in sorted(target_path.iterdir(), key=lambda e: e.name.lower()):
+            if entry.is_dir() and not entry.name.startswith("."):
+                items.append({
+                    "name": entry.name,
+                    "path": str(entry),
+                    "type": "folder",
+                })
+    except PermissionError:
+        return jsonify({"error": "Permission denied"}), 403
+
+    parent = str(target_path.parent) if target_path.parent != target_path else ""
+
+    return jsonify({
+        "items": items,
+        "current": str(target_path),
+        "parent": parent,
+    })
+
+
 @app.route("/api/scan", methods=["POST"])
 def api_scan():
     data = request.json or {}
     folder = data.get("folder", "").strip()
+    append = data.get("append", False)  # Add to existing scan
     if not folder:
         return jsonify({"error": "No folder specified"}), 400
-    result = scan_directory(folder)
+    result = scan_directory(folder, append=append)
     if "error" in result:
         return jsonify(result), 400
-    return jsonify({"ok": True, "count": result["count"], "folder": scan_folder})
+    return jsonify({"ok": True, "count": result["count"], "folder": scan_folder, "folders": scan_folders})
 
 
 @app.route("/api/files")
 def api_files():
     files = []
     for fid, entry in scanned_files.items():
+        # Show relative path from scan root for nested files
+        try:
+            rel = str(Path(entry["path"]).relative_to(scan_folder))
+        except ValueError:
+            rel = entry["filename"]
         files.append({
             "id": entry["id"],
-            "filename": entry["filename"],
+            "filename": rel,
             "codec": entry["codec"],
             "resolution": entry["resolution"],
             "size": entry["size"],
@@ -523,6 +854,8 @@ def api_files():
             "eta": entry["eta"],
             "space_saved": entry["space_saved"],
             "space_saved_fmt": fmt_size(entry["space_saved"]) if entry["space_saved"] else "",
+            "new_size": entry.get("new_size", 0),
+            "new_size_fmt": fmt_size(entry["new_size"]) if entry.get("new_size") else "",
             "error": entry["error"],
             "queue_pos": entry["queue_pos"],
         })
@@ -533,8 +866,11 @@ def api_files():
             "total_space_saved": stats["total_space_saved"],
             "total_space_saved_fmt": fmt_size(stats["total_space_saved"]),
             "files_processed": stats["files_processed"],
-            "files_remaining": len(encode_queue) + (1 if current_encode_id else 0),
-            "is_encoding": current_encode_id is not None,
+            "files_remaining": len(encode_queue) + len(_active_file_ids()),
+            "is_encoding": len(_active_file_ids()) > 0,
+            "workers_active": len(_active_file_ids()),
+            "workers_max": max_workers,
+            "folders": scan_folders,
         },
     })
 
@@ -551,28 +887,71 @@ def api_squish():
     if entry["status"] not in ("pending",):
         return jsonify({"error": f"File status is '{entry['status']}', can't squish"}), 400
 
+    # Dedup: don't queue if same file path is already queued or encoding
     with encoding_lock:
+        src_path = entry["path"]
+        for qid in encode_queue:
+            q_entry = scanned_files.get(qid)
+            if q_entry and q_entry["path"] == src_path:
+                return jsonify({"error": "File already in queue"}), 400
+        for w in active_workers.values():
+            if w["file_id"]:
+                cur = scanned_files.get(w["file_id"])
+                if cur and cur["path"] == src_path:
+                    return jsonify({"error": "File is currently encoding"}), 400
+
         entry["status"] = "queued"
         entry["queue_pos"] = len(encode_queue) + 1
         encode_queue.append(file_id)
 
-    _start_worker()
+    _start_workers()
     return jsonify({"ok": True})
 
 
 @app.route("/api/squish-all", methods=["POST"])
 def api_squish_all():
-    """Queue all pending files."""
+    """Queue all pending files, skipping duplicate paths."""
     count = 0
     with encoding_lock:
+        queued_paths = set()
+        for qid in encode_queue:
+            q_entry = scanned_files.get(qid)
+            if q_entry:
+                queued_paths.add(q_entry["path"])
+        for w in active_workers.values():
+            if w["file_id"]:
+                cur = scanned_files.get(w["file_id"])
+                if cur:
+                    queued_paths.add(cur["path"])
+
         for fid, entry in scanned_files.items():
-            if entry["status"] == "pending":
+            if entry["status"] == "pending" and entry["path"] not in queued_paths:
+                entry["status"] = "queued"
+                encode_queue.append(fid)
+                entry["queue_pos"] = len(encode_queue)
+                queued_paths.add(entry["path"])
+                count += 1
+
+    _start_workers()
+    return jsonify({"ok": True, "queued": count})
+
+
+@app.route("/api/squish-selected", methods=["POST"])
+def api_squish_selected():
+    """Queue selected files by ID list."""
+    data = request.json or {}
+    ids = data.get("ids", [])
+    count = 0
+    with encoding_lock:
+        for fid in ids:
+            entry = scanned_files.get(fid)
+            if entry and entry["status"] in ("pending", "skipped"):
                 entry["status"] = "queued"
                 encode_queue.append(fid)
                 entry["queue_pos"] = len(encode_queue)
                 count += 1
 
-    _start_worker()
+    _start_workers()
     return jsonify({"ok": True, "queued": count})
 
 
@@ -585,7 +964,16 @@ def api_cancel():
 
 @app.route("/api/settings", methods=["GET"])
 def api_get_settings():
-    return jsonify({**settings, "hw_encoders": detect_hw_encoders(), "active_encoder": _choose_encoder()[0]})
+    gpu_enc = detect_gpu_encoder()
+    return jsonify({
+        **settings,
+        "gpu_encoder": gpu_enc or "none",
+        "gpu_label": {
+            "hevc_amf": "AMD AMF",
+            "hevc_qsv": "Intel QSV",
+            "hevc_nvenc": "NVIDIA NVENC",
+        }.get(gpu_enc, "None detected"),
+    })
 
 
 @app.route("/api/settings", methods=["POST"])
@@ -599,11 +987,13 @@ def api_set_settings():
     if "container" in data:
         settings["container"] = data["container"] if data["container"] in ("mkv", "mp4") else "mkv"
     if "hw_mode" in data:
-        settings["hw_mode"] = data["hw_mode"] if data["hw_mode"] in ("auto", "qsv", "nvenc", "videotoolbox", "vaapi", "cpu") else "auto"
+        settings["hw_mode"] = data["hw_mode"] if data["hw_mode"] in ("auto", "amf", "qsv", "nvenc", "cpu") else "auto"
     if "delete_originals" in data:
         settings["delete_originals"] = bool(data["delete_originals"])
     if "output_mode" in data:
         settings["output_mode"] = data["output_mode"] if data["output_mode"] in ("suffix", "replace") else "suffix"
+    if "min_file_size_mb" in data:
+        settings["min_file_size_mb"] = max(0, int(data["min_file_size_mb"]))
     return jsonify({"ok": True, "settings": settings})
 
 
@@ -618,22 +1008,152 @@ def api_rescan():
     return jsonify({"ok": True, "count": result["count"]})
 
 
+@app.route("/api/cancel-all", methods=["POST"])
+def api_cancel_all():
+    """Cancel current encoding and reset all queued/encoding files to pending."""
+    cancel_event.set()
+    time.sleep(0.5)
+    with encoding_lock:
+        for fid, entry in scanned_files.items():
+            if entry["status"] in ("encoding", "queued"):
+                entry["status"] = "pending"
+                entry["progress"] = 0
+                entry["speed_fps"] = 0
+                entry["eta"] = ""
+                entry["queue_pos"] = 0
+        encode_queue.clear()
+        # Clean up workers
+        for wid in list(active_workers.keys()):
+            active_workers[wid]["file_id"] = None
+    _save_state()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/workers", methods=["GET"])
+def api_get_workers():
+    """Get current worker status."""
+    workers = []
+    for wid, w in active_workers.items():
+        entry = scanned_files.get(w["file_id"]) if w["file_id"] else None
+        workers.append({
+            "id": wid,
+            "file_id": w["file_id"],
+            "filename": entry["filename"] if entry else None,
+            "progress": entry["progress"] if entry else 0,
+            "speed_fps": entry["speed_fps"] if entry else 0,
+            "eta": entry["eta"] if entry else "",
+            "alive": w["thread"].is_alive(),
+        })
+    return jsonify({
+        "workers": workers,
+        "max_workers": max_workers,
+        "active": len(_active_file_ids()),
+    })
+
+
+@app.route("/api/workers", methods=["POST"])
+def api_set_workers():
+    """Set the number of workers. +1/-1 or set directly."""
+    global max_workers
+    data = request.json or {}
+    if "count" in data:
+        max_workers = max(1, min(8, int(data["count"])))
+    elif "delta" in data:
+        max_workers = max(1, min(8, max_workers + int(data["delta"])))
+    # If increasing and there's work, spin up more workers
+    if encode_queue:
+        _start_workers()
+    return jsonify({"ok": True, "max_workers": max_workers, "active": len(_active_file_ids())})
+
+
+@app.route("/api/add-folder", methods=["POST"])
+def api_add_folder():
+    """Add another folder to the scan (append mode)."""
+    data = request.json or {}
+    folder = data.get("folder", "").strip()
+    if not folder:
+        return jsonify({"error": "No folder specified"}), 400
+    result = scan_directory(folder, append=True)
+    if "error" in result:
+        return jsonify(result), 400
+    return jsonify({"ok": True, "count": result["count"], "folders": scan_folders})
+
+
+@app.route("/api/restart", methods=["POST"])
+def api_restart():
+    """Save state and restart the server."""
+    _save_state()
+
+    def _do_restart():
+        time.sleep(1)
+        if sys.platform == "win32":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.Popen(
+                [sys.executable] + sys.argv,
+                startupinfo=si,
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        else:
+            subprocess.Popen([sys.executable] + sys.argv)
+        os._exit(0)
+
+    threading.Thread(target=_do_restart, daemon=True).start()
+    return jsonify({"ok": True, "message": "Restarting..."})
+
+
+@app.route("/api/log")
+def api_log():
+    """Return the last encode log for debugging."""
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_encode.log")
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            return f.read(), 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except FileNotFoundError:
+        return "No encode log yet.", 200, {"Content-Type": "text/plain"}
+
+
+@app.route("/api/history")
+def api_history():
+    """Return job history."""
+    history = _load_history()
+    # Add formatted sizes
+    for h in history:
+        h["original_size_fmt"] = fmt_size(h.get("original_size", 0))
+        h["new_size_fmt"] = fmt_size(h.get("new_size", 0))
+        h["space_saved_fmt"] = fmt_size(h.get("space_saved", 0))
+        h["duration_fmt"] = fmt_duration(h.get("duration", 0))
+        orig = h.get("original_size", 1)
+        h["ratio"] = f"{((orig - h.get('new_size', orig)) / orig * 100):.0f}%" if orig > 0 else "0%"
+    total_saved = sum(h.get("space_saved", 0) for h in history)
+    return jsonify({
+        "history": history,
+        "total_saved": total_saved,
+        "total_saved_fmt": fmt_size(total_saved),
+        "total_files": len(history),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="SquishBox — batch video transcoder")
+    parser.add_argument("--port", "-p", type=int, default=5555, help="Web UI port (default: 5555)")
+    args = parser.parse_args()
+
+    _load_state()
+    gpu = detect_gpu_encoder()
+    gpu_label = {"hevc_amf": "AMD AMF", "hevc_qsv": "Intel QSV", "hevc_nvenc": "NVIDIA NVENC"}.get(gpu, "None (CPU only)")
     print()
     print("  ╔═══════════════════════════════════════╗")
-    print("  ║          🗜️  SquishBox v1.0            ║")
-    print("  ║  Point at a folder. Click squish.     ║")
+    print("  ║          🗜️  SquishBox v4.0            ║")
+    print("  ║  Multi-worker + Multi-folder          ║")
     print("  ╚═══════════════════════════════════════╝")
     print()
-    print(f"  → Open http://localhost:5555 in your browser")
-    hw = detect_hw_encoders()
-    available = [k for k, v in hw.items() if v]
-    encoder_name, _ = _choose_encoder()
-    print(f"  → Hardware encoders: {', '.join(available) if available else 'none (CPU only)'}")
-    print(f"  → Active encoder: {encoder_name}")
+    print(f"  → Open http://localhost:{args.port} in your browser")
+    print(f"  → GPU encoder: {gpu_label} ({gpu or 'none'})")
     print()
-    app.run(host="0.0.0.0", port=5555, debug=False)
+    app.run(host="0.0.0.0", port=args.port, debug=False)
