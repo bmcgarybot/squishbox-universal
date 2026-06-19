@@ -491,6 +491,7 @@
       <button class="btn btn-outline btn-sm" onclick="rescan()">🔄 Rescan</button>
       <button class="btn btn-outline btn-sm" onclick="selectLargeNonHEVC()" title="Select all non-HEVC files over 1 GB">🐘 Select Large</button>
       <button class="btn btn-outline btn-sm" onclick="setSort('status')" title="Sort by status: active → queued → locked → pending → done">⚡ Active First</button>
+      <button class="btn btn-outline btn-sm" onclick="clearLocks()" title="Remove all lock files from scanned folders">🔓 Clear Locks</button>
       <!-- Worker controls -->
       <span style="margin-left:16px;display:inline-flex;align-items:center;gap:6px;font-size:0.85rem;color:var(--text-dim);">
         🖥️ GPU:
@@ -1251,6 +1252,17 @@ function browserGoToPath() {
   const input = document.getElementById('browserPathInput');
   const path = input.value.trim();
   if (path) browserNavigate(path);
+}
+
+async function clearLocks() {
+  const r = await fetch(API + '/api/clear-locks', {method:'POST'});
+  const data = await r.json();
+  if (data.ok) {
+    alert(`Cleared ${data.cleared} lock file(s). Locked files are now available.`);
+    refreshFiles();
+  } else {
+    alert('Failed to clear locks: ' + (data.error || 'Unknown error'));
+  }
 }
 
 var browserMode = 'scan'; // 'scan' or 'add'

@@ -161,7 +161,7 @@ def _release_lock(filepath: str):
 
 
 def _is_locked(filepath: str) -> bool:
-    """Check if a file is locked by another instance."""
+    """Check if a file is locked by another instance (not this machine)."""
     lp = _lock_path(filepath)
     if not os.path.exists(lp):
         return False
@@ -170,6 +170,12 @@ def _is_locked(filepath: str) -> bool:
         if age_hours >= _LOCK_STALE_HOURS:
             os.remove(lp)  # Clean up stale lock
             return False
+        # If WE created the lock (same hostname), it's ours — not locked
+        with open(lp, "r") as f:
+            parts = f.read().strip().split("|")
+            if parts and parts[0] == _socket.gethostname():
+                os.remove(lp)  # Clean up our own stale lock
+                return False
         return True
     except OSError:
         return False
@@ -1004,6 +1010,29 @@ def api_browse():
         "current": str(target_path),
         "parent": parent,
     })
+
+
+@app.route("/api/clear-locks", methods=["POST"])
+def api_clear_locks():
+    """Remove all .squishbox.lock files from scanned folders."""
+    cleared = 0
+    folders = scan_folders if scan_folders else ([scan_folder] if scan_folder else [])
+    for folder in folders:
+        fp = Path(folder)
+        if fp.is_dir():
+            for lock in fp.rglob("*" + _LOCK_SUFFIX):
+                try:
+                    lock.unlink()
+                    cleared += 1
+                except OSError:
+                    pass
+    # Also update scanned_files status for any locked files
+    for fid, entry in list(scanned_files.items()):
+        if entry.get("status") == "locked":
+            entry["status"] = "pending"
+            entry["error"] = ""
+            entry["lock_host"] = ""
+    return jsonify({"ok": True, "cleared": cleared})
 
 
 @app.route("/api/scan", methods=["POST"])
