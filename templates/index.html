@@ -50,7 +50,7 @@
   .qsv-badge.unavailable { background: rgba(248,113,113,0.15); color: var(--red); }
 
   /* Layout */
-  .container { max-width: 1600px; margin: 0 auto; padding: 24px 32px; }
+  .container { max-width: none; margin: 0 auto; padding: 24px 32px; }
 
   /* Folder input */
   .folder-bar {
@@ -432,19 +432,10 @@
   /* Filename truncation */
   .fname { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* Column width hints */
-  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-  .check-col { width: 36px; }
-  .col-file { width: 30%; min-width: 200px; }
-  .col-codec { width: 60px; }
-  .col-res { width: 80px; }
-  .col-size { width: 70px; }
-  .col-newsize { width: 70px; }
-  .col-dur { width: 70px; }
-  .col-progress { width: 18%; min-width: 120px; }
-  .col-status { width: 75px; }
-  .col-saved { width: 70px; }
-  .col-actions { width: 40px; }
+  /* Column sizing — no fixed layout, just hints */
+  th, td { white-space: nowrap; }
+  .col-file { min-width: 180px; white-space: normal; word-break: break-word; }
+  .col-progress { min-width: 100px; }
 </style>
 </head>
 <body>
