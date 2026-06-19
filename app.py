@@ -941,6 +941,37 @@ def api_browse():
     data = request.json or {}
     target = data.get("path", "").strip()
 
+    # macOS: auto-mount SMB shares when user types smb:// path
+    if target.lower().startswith("smb://") and sys.platform == "darwin":
+        try:
+            import subprocess as _sp
+            # Use osascript to mount the share silently via Finder
+            _sp.run(["open", target], timeout=10)
+            import time as _t
+            # Wait a moment for the mount to appear
+            _t.sleep(3)
+            # Parse share name from URL: smb://host/share -> /Volumes/share
+            parts = target.replace("smb://", "").strip("/").split("/")
+            if len(parts) >= 2:
+                share_name = parts[1]
+                # Find the mount point in /Volumes/
+                for v in Path("/Volumes").iterdir():
+                    if v.name.lower() == share_name.lower() or v.name.lower().startswith(share_name.lower()):
+                        target = str(v)
+                        break
+                else:
+                    target = f"/Volumes/{share_name}"
+            else:
+                # Just the host — show available shares
+                return jsonify({"error": "Include the share name: smb://hostname/sharename"}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to mount: {e}"}), 400
+
+    # macOS: convert smb:// to mount on other platforms too
+    if target.lower().startswith("smb://") and sys.platform != "darwin":
+        # Convert smb://host/share to \\host\share for Windows
+        target = target.replace("smb://", "\\\\").replace("/", "\\")
+
     # No path → list drives on Windows, volumes on macOS, root on Linux
     if not target:
         if sys.platform == "win32":
