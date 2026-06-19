@@ -25,6 +25,14 @@ from flask import Flask, jsonify, render_template, request
 
 app = Flask(__name__)
 
+
+# Catch all unhandled errors and return JSON instead of HTML
+@app.errorhandler(Exception)
+def handle_exception(e):
+    import traceback
+    traceback.print_exc()
+    return jsonify({"error": str(e)}), 500
+
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
