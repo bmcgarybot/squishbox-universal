@@ -943,27 +943,51 @@ def api_browse():
 
     # macOS: auto-mount SMB shares when user types smb:// path
     if target.lower().startswith("smb://") and sys.platform == "darwin":
+        parts = target.replace("smb://", "").strip("/").split("/")
+        hostname = parts[0] if parts else ""
+
+        if len(parts) < 2 or not parts[1]:
+            # Just hostname — list available shares
+            try:
+                import subprocess as _sp4
+                result = _sp4.run(["smbutil", "view", f"//{hostname}"],
+                                  capture_output=True, text=True, timeout=10)
+                shares = []
+                in_shares = False
+                for line in result.stdout.splitlines():
+                    if "Share" in line and "Type" in line:
+                        in_shares = True
+                        continue
+                    if in_shares and line.strip():
+                        cols = line.split()
+                        if cols and cols[-1] == "Disk":
+                            share_name = " ".join(cols[:-1])
+                            if not share_name.endswith("$"):  # Skip admin shares
+                                shares.append({
+                                    "name": f"📁 {share_name}",
+                                    "path": f"smb://{hostname}/{share_name}",
+                                    "type": "network",
+                                })
+                if not shares:
+                    return jsonify({"error": f"No shares found on {hostname}. Check credentials."}), 400
+                return jsonify({"items": shares, "current": f"smb://{hostname}", "parent": ""})
+            except Exception as e:
+                return jsonify({"error": f"Cannot list shares on {hostname}: {e}"}), 400
+
+        # Has share name — mount it
+        share_name = parts[1]
         try:
             import subprocess as _sp
-            # Use osascript to mount the share silently via Finder
             _sp.run(["open", target], timeout=10)
             import time as _t
-            # Wait a moment for the mount to appear
             _t.sleep(3)
-            # Parse share name from URL: smb://host/share -> /Volumes/share
-            parts = target.replace("smb://", "").strip("/").split("/")
-            if len(parts) >= 2:
-                share_name = parts[1]
-                # Find the mount point in /Volumes/
-                for v in Path("/Volumes").iterdir():
-                    if v.name.lower() == share_name.lower() or v.name.lower().startswith(share_name.lower()):
-                        target = str(v)
-                        break
-                else:
-                    target = f"/Volumes/{share_name}"
+            # Find the mount point in /Volumes/
+            for v in Path("/Volumes").iterdir():
+                if v.name.lower() == share_name.lower() or v.name.lower().startswith(share_name.lower()):
+                    target = str(v)
+                    break
             else:
-                # Just the host — show available shares
-                return jsonify({"error": "Include the share name: smb://hostname/sharename"}), 400
+                target = f"/Volumes/{share_name}"
         except Exception as e:
             return jsonify({"error": f"Failed to mount: {e}"}), 400
 
@@ -1007,14 +1031,45 @@ def api_browse():
             if vol_path.is_dir():
                 for entry in sorted(vol_path.iterdir(), key=lambda e: e.name.lower()):
                     if entry.is_dir():
+                        # Detect if it's a network mount
+                        is_network = False
+                        try:
+                            import subprocess as _sp2
+                            mounts = _sp2.run(["mount"], capture_output=True, text=True, timeout=5).stdout
+                            if f"on /Volumes/{entry.name}" in mounts and "smbfs" in mounts.split(f"on /Volumes/{entry.name}")[0].split("\n")[-1]:
+                                is_network = True
+                        except Exception:
+                            pass
+                        icon = "🖥" if is_network else "💾"
                         volumes.append({
-                            "name": entry.name,
+                            "name": f"{icon} {entry.name}",
                             "path": str(entry),
-                            "type": "drive",
+                            "type": "network" if is_network else "drive",
                         })
             # Also add home directory for convenience
             home = Path.home()
             volumes.insert(0, {"name": f"🏠 {home.name}", "path": str(home), "type": "folder"})
+            # Discover network computers via dns-sd / Bonjour
+            try:
+                import subprocess as _sp3
+                result = _sp3.run(["bash", "-c", "timeout 2 dns-sd -B _smb._tcp local 2>/dev/null || true"],
+                                  capture_output=True, text=True, timeout=5)
+                seen_hosts = set()
+                for line in result.stdout.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 7 and parts[1] != "Timestamp":
+                        host = parts[-1]
+                        if host and host not in seen_hosts:
+                            seen_hosts.add(host)
+                            # Only show if not already mounted
+                            if not any(v["name"].endswith(host) for v in volumes):
+                                volumes.append({
+                                    "name": f"🌐 {host}",
+                                    "path": f"smb://{host}",
+                                    "type": "network",
+                                })
+            except Exception:
+                pass
             return jsonify({"items": volumes, "current": "", "parent": ""})
         else:
             target = "/"
