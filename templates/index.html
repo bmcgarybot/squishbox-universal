@@ -224,6 +224,7 @@
   .status-pending { background: rgba(139,143,163,0.15); color: var(--text-dim); }
   .status-queued { background: rgba(96,165,250,0.15); color: var(--blue); }
   .status-encoding { background: rgba(124,92,252,0.15); color: var(--accent); }
+  .status-locked { background: rgba(251,191,36,0.15); color: var(--orange); }
   .status-done { background: rgba(52,211,153,0.15); color: var(--green); }
   .status-error { background: rgba(248,113,113,0.15); color: var(--red); }
   .status-skipped { background: rgba(139,143,163,0.1); color: var(--text-dim); }
@@ -489,6 +490,7 @@
       <button class="btn btn-outline btn-sm" id="cancelAllBtn" onclick="cancelAll()" style="display:none;">🛑 Cancel All</button>
       <button class="btn btn-outline btn-sm" onclick="rescan()">🔄 Rescan</button>
       <button class="btn btn-outline btn-sm" onclick="selectLargeNonHEVC()" title="Select all non-HEVC files over 1 GB">🐘 Select Large</button>
+      <button class="btn btn-outline btn-sm" onclick="setSort('status')" title="Sort by status: active → queued → locked → pending → done">⚡ Active First</button>
       <!-- Worker controls -->
       <span style="margin-left:16px;display:inline-flex;align-items:center;gap:6px;font-size:0.85rem;color:var(--text-dim);">
         🖥️ GPU:
@@ -685,6 +687,8 @@ let lastClickedIdx = -1;
 
 function sortFiles(files) {
   const dir = sortDir === 'asc' ? 1 : -1;
+  // Smart status priority: encoding first, then queued (by position), locked, pending, done, skipped, error
+  const statusPriority = { encoding: 0, queued: 1, locked: 2, pending: 3, done: 4, skipped: 5, error: 6, cancelled: 7 };
   return [...files].sort((a, b) => {
     let va, vb;
     switch (sortCol) {
@@ -693,7 +697,13 @@ function sortFiles(files) {
       case 'resolution': va = parseInt(a.resolution.split('x')[1]) || 0; vb = parseInt(b.resolution.split('x')[1]) || 0; return (va - vb) * dir;
       case 'size': return (a.size - b.size) * dir;
       case 'duration': return (a.duration - b.duration) * dir;
-      case 'status': va = a.status; vb = b.status; return va < vb ? -dir : va > vb ? dir : 0;
+      case 'status':
+        va = statusPriority[a.status] ?? 99;
+        vb = statusPriority[b.status] ?? 99;
+        if (va !== vb) return (va - vb) * dir;
+        // Sub-sort queued by queue position (ascending = lowest queue# first)
+        if (a.status === 'queued' && b.status === 'queued') return (a.queue_pos - b.queue_pos) * dir;
+        return 0;
       default: return 0;
     }
   });
@@ -765,6 +775,9 @@ function renderFiles(files) {
       progressHtml = `<span style="color:var(--text-dim);font-size:0.8rem;">Queue #${f.queue_pos}</span>`;
     } else if (f.status === 'error') {
       progressHtml = `<span style="color:var(--red);font-size:0.75rem;" title="${esc(f.error)}">⚠ ${esc(f.error).substring(0,80)}</span>`;
+    } else if (f.status === 'locked' || (f.status === 'skipped' && f.error && f.error.includes('Locked'))) {
+      const lockHost = f.lock_host || (f.error ? f.error.replace('Locked by another SquishBox instance', '').replace('Locked by ', '').trim() : '');
+      progressHtml = `<span style="color:var(--orange);font-size:0.8rem;">🔒 ${lockHost ? lockHost : 'Another machine'}</span>`;
     }
 
     const canSquish = f.status === 'pending';

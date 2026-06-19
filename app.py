@@ -435,9 +435,17 @@ def scan_directory(folder: str, append: bool = False) -> dict:
 
         # Check if locked by another SquishBox instance
         is_locked = _is_locked(str(f))
+        lock_host = ""
         if is_locked:
-            file_status = "skipped"
-            file_error = "Locked by another SquishBox instance"
+            file_status = "locked"
+            # Read hostname from lock file
+            try:
+                with open(_lock_path(str(f)), "r") as lf:
+                    parts = lf.read().strip().split("|")
+                    lock_host = parts[0] if parts else ""
+            except OSError:
+                pass
+            file_error = f"Locked by {lock_host}" if lock_host else "Locked by another SquishBox instance"
         elif already_target:
             file_status = "skipped"
             file_error = ""
@@ -462,6 +470,7 @@ def scan_directory(folder: str, append: bool = False) -> dict:
             "space_saved": 0,
             "new_size": 0,
             "error": file_error,
+            "lock_host": lock_host,
             "queue_pos": 0,
         }
 
@@ -997,6 +1006,7 @@ def api_files():
             "new_size": entry.get("new_size", 0),
             "new_size_fmt": fmt_size(entry["new_size"]) if entry.get("new_size") else "",
             "error": entry["error"],
+            "lock_host": entry.get("lock_host", ""),
             "queue_pos": entry["queue_pos"],
         })
     return jsonify({
