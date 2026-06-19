@@ -131,23 +131,29 @@ def _lock_path(filepath: str) -> str:
 
 
 def _acquire_lock(filepath: str) -> bool:
-    """Try to create a lock file. Returns True if lock acquired, False if already locked."""
+    """Try to create a lock file. Returns True if lock acquired, False if already locked by another machine."""
     lp = _lock_path(filepath)
+    my_host = _socket.gethostname()
     # Check for existing lock
     if os.path.exists(lp):
-        # Check if stale (older than _LOCK_STALE_HOURS)
         try:
             age_hours = (time.time() - os.path.getmtime(lp)) / 3600
-            if age_hours < _LOCK_STALE_HOURS:
-                return False  # Valid lock, skip this file
-            # Stale lock — remove and take over
-            os.remove(lp)
+            if age_hours >= _LOCK_STALE_HOURS:
+                os.remove(lp)  # Stale lock — take over
+            else:
+                # Check if it's our own lock (from crash) — reclaim it
+                with open(lp, "r") as f:
+                    parts = f.read().strip().split("|")
+                if parts and parts[0] == my_host:
+                    os.remove(lp)  # Our own stale lock — reclaim
+                else:
+                    return False  # Another machine's valid lock — skip
         except OSError:
             return False
     # Create lock
     try:
         with open(lp, "w") as f:
-            f.write(f"{_socket.gethostname()}|{os.getpid()}|{time.time()}\n")
+            f.write(f"{my_host}|{os.getpid()}|{time.time()}\n")
         return True
     except OSError:
         return False
