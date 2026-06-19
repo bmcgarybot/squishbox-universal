@@ -1054,6 +1054,13 @@ def api_files():
     files = []
     # Snapshot to avoid "OrderedDict mutated during iteration" when scan thread is running
     for fid, entry in list(scanned_files.items()):
+        # Live re-check: if status is "locked", re-check if the lock is still there
+        if entry.get("status") == "locked":
+            if not _is_locked(entry["path"]):
+                entry["status"] = "pending"
+                entry["error"] = ""
+                entry["lock_host"] = ""
+
         # Show relative path from scan root for nested files
         try:
             rel = str(Path(entry["path"]).relative_to(scan_folder))
@@ -1148,7 +1155,7 @@ def api_squish_all():
                     queued_paths.add(cur["path"])
 
         for fid, entry in scanned_files.items():
-            if entry["status"] == "pending" and entry["path"] not in queued_paths:
+            if entry["status"] in ("pending", "locked") and entry["path"] not in queued_paths:
                 entry["status"] = "queued"
                 encode_queue.append(fid)
                 entry["queue_pos"] = len(encode_queue)
