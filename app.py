@@ -1375,6 +1375,23 @@ def api_history():
     })
 
 
+@app.route("/api/clear-history", methods=["POST"])
+def api_clear_history():
+    """Wipe all encoding history."""
+    try:
+        if os.path.exists(_history_file):
+            with open(_history_file, "w", encoding="utf-8") as f:
+                json.dump([], f)
+        # Also clear done/completed status from scanned files so the list looks fresh
+        for fid, entry in list(scanned_files.items()):
+            if entry.get("status") in ("done", "skipped", "error", "cancelled"):
+                entry["status"] = "pending"
+                entry["error"] = ""
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------

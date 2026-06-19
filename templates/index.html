@@ -523,8 +523,9 @@
 <div class="browser-overlay" id="historyOverlay" onclick="if(event.target===this)this.classList.remove('open')">
   <div class="browser-panel" style="width:800px;">
     <h2>📊 Encode History</h2>
-    <div style="display:flex;justify-content:space-between;margin-bottom:12px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
       <span id="histTotalFiles" style="color:var(--text-dim);font-size:0.85rem;"></span>
+      <button class="btn btn-sm" style="background:#e74c3c;color:#fff;border:none;" onclick="clearHistory()">🗑️ Clear History</button>
       <span id="histTotalSaved" style="color:var(--green);font-weight:700;"></span>
     </div>
     <div class="browser-list" id="historyList" style="max-height:500px;">
@@ -1282,6 +1283,18 @@ function browserSelect() {
 }
 
 // -- History --
+async function clearHistory() {
+  if (!confirm('Clear all encoding history? This cannot be undone.')) return;
+  const r = await fetch(API + '/api/clear-history', {method:'POST'});
+  const data = await r.json();
+  if (data.ok) {
+    document.getElementById('historyList').innerHTML = '<div class="browser-empty">History cleared.</div>';
+    document.getElementById('histTotalFiles').textContent = '0 files processed';
+    document.getElementById('histTotalSaved').textContent = 'Total saved: 0 B';
+    refreshFiles();
+  }
+}
+
 async function openHistory() {
   document.getElementById('historyOverlay').classList.add('open');
   const list = document.getElementById('historyList');
