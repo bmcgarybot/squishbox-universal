@@ -3,8 +3,19 @@
 cd "$(dirname "$0")"
 echo "📦 Pulling latest code..."
 git pull
-echo "🔄 Restarting SquishBox..."
-launchctl kickstart -k "gui/$(id -u)/com.squishbox.server" 2>/dev/null && echo "✅ Restarted!" || echo "⚠️ Service not found — start it with: ./setup-mac.sh"
+echo "🔄 Stopping background service (if running)..."
+launchctl unload "$HOME/Library/LaunchAgents/com.squishbox.server.plist" 2>/dev/null
+# Kill any existing SquishBox python processes
+pkill -f "python.*app.py" 2>/dev/null
+sleep 1
+echo "🚀 Starting SquishBox in Terminal (Full Disk Access)..."
+source venv/bin/activate 2>/dev/null
 echo ""
-echo "Done! You can close this window."
-read -p ""
+echo "  ╔═══════════════════════════════════╗"
+echo "  ║  Keep this window open!           ║"
+echo "  ║  SquishBox runs here for          ║"
+echo "  ║  Full Disk Access.                ║"
+echo "  ║  Close window = stop SquishBox    ║"
+echo "  ╚═══════════════════════════════════╝"
+echo ""
+python3 app.py
