@@ -935,6 +935,53 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/native-browse", methods=["POST"])
+def api_native_browse():
+    """Open the OS native folder picker and return the selected path."""
+    import subprocess as _nsp
+    try:
+        if sys.platform == "darwin":
+            # macOS: use osascript to open Finder folder dialog
+            script = 'tell application "Finder" to activate\n' \
+                     'set folderPath to POSIX path of (choose folder with prompt "Select folder to scan")\n' \
+                     'return folderPath'
+            result = _nsp.run(["osascript", "-e", script],
+                              capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                return jsonify({"path": None, "cancelled": True})
+            path = result.stdout.strip()
+            return jsonify({"path": path, "cancelled": False})
+        elif sys.platform == "win32":
+            # Windows: use PowerShell folder dialog
+            ps_script = '''
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = "Select folder to scan"
+$dialog.ShowNewFolderButton = $false
+$result = $dialog.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+    Write-Output $dialog.SelectedPath
+} else {
+    Write-Output "CANCELLED"
+}'''
+            result = _nsp.run(["powershell", "-Command", ps_script],
+                              capture_output=True, text=True, timeout=120)
+            path = result.stdout.strip()
+            if path == "CANCELLED" or not path:
+                return jsonify({"path": None, "cancelled": True})
+            return jsonify({"path": path, "cancelled": False})
+        else:
+            # Linux: try zenity
+            result = _nsp.run(["zenity", "--file-selection", "--directory",
+                               "--title=Select folder to scan"],
+                              capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                return jsonify({"path": None, "cancelled": True})
+            return jsonify({"path": result.stdout.strip(), "cancelled": False})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/browse", methods=["POST"])
 def api_browse():
     """List drives (if no path) or subdirectories of a given path."""

@@ -457,6 +457,7 @@
   <div class="folder-bar">
     <input type="text" id="folderInput" placeholder="Paste a folder path, e.g. D:\Videos\Movies" autofocus>
     <button class="btn btn-outline" onclick="openBrowser()">📂 Browse</button>
+    <button class="btn btn-outline" onclick="nativeBrowse()" title="Open system file picker">🖥️ Pick Folder</button>
     <button class="btn btn-primary" id="scanBtn" onclick="scanFolder()">🔍 Scan</button>
     <button class="btn btn-outline btn-sm" id="addFolderBtn" onclick="openBrowserForAdd()" style="display:none;" title="Add another folder to the queue">➕ Add Folder</button>
   </div>
@@ -1171,6 +1172,19 @@ async function saveSettings() {
 let browserCurrentPath = '';
 
 async function openBrowser() {
+
+async function nativeBrowse() {
+  try {
+    const r = await fetch(API + '/api/native-browse', {method:'POST'});
+    const data = await r.json();
+    if (data.error) { alert('Error: ' + data.error); return; }
+    if (data.cancelled || !data.path) return; // User cancelled
+    document.getElementById('folderInput').value = data.path;
+    submitFolder(data.path);
+  } catch(e) { alert('Failed to open folder picker: ' + e.message); }
+}
+
+
   browserMode = 'scan';
   document.getElementById('browserOverlay').classList.add('open');
   document.getElementById('browserSelectBtn').textContent = '✅ Scan This Folder';
