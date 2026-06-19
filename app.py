@@ -35,7 +35,7 @@ settings = {
     "quality": 23,           # CRF / global_quality value
     "max_resolution": 1080,  # 0 = no limit (4K), 1080, 720
     "container": "mkv",      # mkv or mp4
-    "hw_mode": "auto",       # auto / amf / qsv / nvenc / cpu
+    "hw_mode": "auto",       # auto / videotoolbox / amf / qsv / nvenc / cpu
     "delete_originals": False,
     "output_mode": "replace", # suffix (_squished) or replace
     "min_file_size_mb": 10,  # skip files smaller than this (filters out NFO/info junk)
@@ -125,8 +125,9 @@ def detect_gpu_encoder() -> str | None:
     if _hw_encoder is not None:
         return _hw_encoder if _hw_encoder != "" else None
 
-    # Order: AMD AMF → Intel QSV → NVIDIA NVENC
+    # Order: Apple VideoToolbox → AMD AMF → Intel QSV → NVIDIA NVENC
     candidates = [
+        ("hevc_videotoolbox", ["-q:v", "60"]),
         ("hevc_amf", ["-global_quality", "23"]),
         ("hevc_qsv", ["-global_quality", "23"]),
         ("hevc_nvenc", ["-rc", "constqp", "-qp", "23"]),
@@ -204,6 +205,8 @@ def _choose_encoder() -> tuple[str, list[str]]:
 
     if mode == "auto" and gpu_enc:
         enc = gpu_enc
+    elif mode == "videotoolbox":
+        enc = "hevc_videotoolbox"
     elif mode == "qsv":
         enc = "hevc_qsv"
     elif mode == "amf":
@@ -214,7 +217,11 @@ def _choose_encoder() -> tuple[str, list[str]]:
         enc = gpu_enc or "libx265"
 
     # Encoder-specific quality args
-    if enc == "hevc_amf":
+    if enc == "hevc_videotoolbox":
+        # VideoToolbox uses -q:v (1-100, lower=better). Map CRF 18-28 → VT 40-75
+        vt_quality = int(40 + (quality - 18) * 3.5)
+        return enc, ["-q:v", str(vt_quality)]
+    elif enc == "hevc_amf":
         return enc, ["-quality", "quality", "-rc", "cqp", "-qp_i", str(quality), "-qp_p", str(quality)]
     elif enc == "hevc_qsv":
         return enc, ["-global_quality", str(quality), "-preset", "medium"]
@@ -999,6 +1006,7 @@ def api_get_settings():
         **settings,
         "gpu_encoder": gpu_enc or "none",
         "gpu_label": {
+            "hevc_videotoolbox": "Apple VideoToolbox",
             "hevc_amf": "AMD AMF",
             "hevc_qsv": "Intel QSV",
             "hevc_nvenc": "NVIDIA NVENC",
@@ -1017,7 +1025,7 @@ def api_set_settings():
     if "container" in data:
         settings["container"] = data["container"] if data["container"] in ("mkv", "mp4") else "mkv"
     if "hw_mode" in data:
-        settings["hw_mode"] = data["hw_mode"] if data["hw_mode"] in ("auto", "amf", "qsv", "nvenc", "cpu") else "auto"
+        settings["hw_mode"] = data["hw_mode"] if data["hw_mode"] in ("auto", "videotoolbox", "amf", "qsv", "nvenc", "cpu") else "auto"
     if "delete_originals" in data:
         settings["delete_originals"] = bool(data["delete_originals"])
     if "output_mode" in data:
@@ -1194,10 +1202,10 @@ if __name__ == "__main__":
 
     _load_state()
     gpu = detect_gpu_encoder()
-    gpu_label = {"hevc_amf": "AMD AMF", "hevc_qsv": "Intel QSV", "hevc_nvenc": "NVIDIA NVENC"}.get(gpu, "None (CPU only)")
+    gpu_label = {"hevc_videotoolbox": "Apple VideoToolbox", "hevc_amf": "AMD AMF", "hevc_qsv": "Intel QSV", "hevc_nvenc": "NVIDIA NVENC"}.get(gpu, "None (CPU only)")
     print()
     print("  ╔═══════════════════════════════════════╗")
-    print("  ║          🗜️  SquishBox v4.0            ║")
+    print("  ║          🗜️  SquishBox v5.1            ║")
     print("  ║  Multi-worker + Multi-folder          ║")
     print("  ╚═══════════════════════════════════════╝")
     print()
