@@ -929,6 +929,24 @@ def api_browse():
                 dp = f"{letter}:\\"
                 if os.path.isdir(dp):
                     drives.append({"name": f"{letter}:", "path": dp, "type": "drive"})
+            # Also discover network shares via 'net use'
+            try:
+                result = _run(["net", "use"], capture_output=True, text=True, timeout=5)
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    # Lines like: OK  Z:  \\SERVER\Share  Microsoft Windows Network
+                    # or:  OK  \\SERVER\Share  Microsoft Windows Network  (no drive letter)
+                    for i, p in enumerate(parts):
+                        if p.startswith("\\\\"):
+                            unc = p
+                            # Skip if already mapped to a drive letter (already in list)
+                            has_letter = any(x.isalpha() and len(x) <= 2 and x.endswith(":") for x in parts[:i])
+                            if not has_letter:
+                                name = unc.split("\\")[-1] or unc
+                                drives.append({"name": f"📡 {name}", "path": unc, "type": "network"})
+                            break
+            except Exception:
+                pass
             return jsonify({"items": drives, "current": "", "parent": ""})
         elif sys.platform == "darwin":
             # macOS: show /Volumes/ entries (includes local disks + network shares)

@@ -550,7 +550,9 @@
         <button class="btn btn-outline btn-sm" id="browserUpBtn" onclick="browserUp()">⬆️ Up</button>
         <button class="btn btn-outline btn-sm" onclick="browserHome()">🏠 Drives</button>
       </div>
-      <div style="display:flex;gap:8px;">
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="text" id="browserPathInput" placeholder="\\\\server\\share or C:\\path" style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:0.85rem;width:200px;" onkeydown="if(event.key==='Enter')browserGoToPath()">
+        <button class="btn btn-outline btn-sm" onclick="browserGoToPath()" title="Navigate to typed path">➡️ Go</button>
         <button class="btn btn-outline btn-sm" onclick="closeBrowser()">Cancel</button>
         <button class="btn btn-green btn-sm" onclick="browserSelect()" id="browserSelectBtn">✅ Scan This Folder</button>
       </div>
@@ -1243,6 +1245,12 @@ async function browserUp() {
 
 function browserHome() {
   browserNavigate('');
+}
+
+function browserGoToPath() {
+  const input = document.getElementById('browserPathInput');
+  const path = input.value.trim();
+  if (path) browserNavigate(path);
 }
 
 var browserMode = 'scan'; // 'scan' or 'add'
