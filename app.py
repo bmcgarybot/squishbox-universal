@@ -814,7 +814,7 @@ def api_browse():
     data = request.json or {}
     target = data.get("path", "").strip()
 
-    # No path → list drives on Windows, root on Unix
+    # No path → list drives on Windows, volumes on macOS, root on Linux
     if not target:
         if sys.platform == "win32":
             import string
@@ -824,6 +824,22 @@ def api_browse():
                 if os.path.isdir(dp):
                     drives.append({"name": f"{letter}:", "path": dp, "type": "drive"})
             return jsonify({"items": drives, "current": "", "parent": ""})
+        elif sys.platform == "darwin":
+            # macOS: show /Volumes/ entries (includes local disks + network shares)
+            volumes = []
+            vol_path = Path("/Volumes")
+            if vol_path.is_dir():
+                for entry in sorted(vol_path.iterdir(), key=lambda e: e.name.lower()):
+                    if entry.is_dir():
+                        volumes.append({
+                            "name": entry.name,
+                            "path": str(entry),
+                            "type": "drive",
+                        })
+            # Also add home directory for convenience
+            home = Path.home()
+            volumes.insert(0, {"name": f"🏠 {home.name}", "path": str(home), "type": "folder"})
+            return jsonify({"items": volumes, "current": "", "parent": ""})
         else:
             target = "/"
 
