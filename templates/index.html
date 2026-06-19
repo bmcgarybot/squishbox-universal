@@ -155,6 +155,10 @@
     background: var(--surface2);
     border-bottom: 1px solid var(--border);
   }
+  th.sortable { cursor: pointer; user-select: none; transition: color 0.2s; }
+  th.sortable:hover { color: var(--accent); }
+  th.sortable .sort-arrow { margin-left: 4px; font-size: 0.65rem; opacity: 0.4; }
+  th.sortable.active .sort-arrow { opacity: 1; color: var(--accent); }
   td {
     padding: 10px 16px;
     font-size: 0.875rem;
@@ -163,6 +167,14 @@
   }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: rgba(124,92,252,0.04); }
+  tr.selected td { background: rgba(124,92,252,0.10); }
+  tr.drag-over td { background: rgba(124,92,252,0.15); }
+  tr.row-optimized td { background: rgba(52,211,153,0.04); }
+  tr.row-candidate td { background: rgba(251,191,36,0.04); }
+  tr.row-error td { background: rgba(248,113,113,0.06); }
+  tr.selected.row-optimized td { background: rgba(124,92,252,0.10); }
+  tr.selected.row-candidate td { background: rgba(124,92,252,0.10); }
+  tr.selected.row-error td { background: rgba(124,92,252,0.10); }
 
   .codec-badge {
     display: inline-block;
@@ -476,6 +488,7 @@
       <button class="btn btn-red btn-sm" id="cancelBtn" onclick="cancelEncode()" style="display:none;">⏹ Cancel</button>
       <button class="btn btn-outline btn-sm" id="cancelAllBtn" onclick="cancelAll()" style="display:none;">🛑 Cancel All</button>
       <button class="btn btn-outline btn-sm" onclick="rescan()">🔄 Rescan</button>
+      <button class="btn btn-outline btn-sm" onclick="selectLargeNonHEVC()" title="Select all non-HEVC files over 1 GB">🐘 Select Large</button>
       <!-- Worker controls -->
       <span style="margin-left:16px;display:inline-flex;align-items:center;gap:6px;font-size:0.85rem;color:var(--text-dim);">
         🖥️ GPU:
@@ -665,6 +678,48 @@ function startPolling() {
 
 // -- Render files --
 let selectedIds = new Set();
+let sortCol = localStorage.getItem('sb_sortCol') || 'size';
+let sortDir = localStorage.getItem('sb_sortDir') || 'desc';
+let lastClickedIdx = -1;
+
+function sortFiles(files) {
+  const dir = sortDir === 'asc' ? 1 : -1;
+  return [...files].sort((a, b) => {
+    let va, vb;
+    switch (sortCol) {
+      case 'filename': va = a.filename.toLowerCase(); vb = b.filename.toLowerCase(); return va < vb ? -dir : va > vb ? dir : 0;
+      case 'codec': va = a.codec; vb = b.codec; return va < vb ? -dir : va > vb ? dir : 0;
+      case 'resolution': va = parseInt(a.resolution.split('x')[1]) || 0; vb = parseInt(b.resolution.split('x')[1]) || 0; return (va - vb) * dir;
+      case 'size': return (a.size - b.size) * dir;
+      case 'duration': return (a.duration - b.duration) * dir;
+      case 'status': va = a.status; vb = b.status; return va < vb ? -dir : va > vb ? dir : 0;
+      default: return 0;
+    }
+  });
+}
+
+function setSort(col) {
+  if (sortCol === col) { sortDir = sortDir === 'asc' ? 'desc' : 'asc'; }
+  else { sortCol = col; sortDir = col === 'filename' || col === 'codec' || col === 'status' ? 'asc' : 'desc'; }
+  localStorage.setItem('sb_sortCol', sortCol);
+  localStorage.setItem('sb_sortDir', sortDir);
+  renderFiles(currentFiles);
+}
+
+function sortArrow(col) {
+  const active = sortCol === col;
+  const arrow = active ? (sortDir === 'asc' ? '▲' : '▼') : '▲';
+  return `<span class="sort-arrow">${arrow}</span>`;
+}
+
+function getRowColor(f) {
+  if (f.status === 'error') return 'row-error';
+  const isHEVC = f.codec === 'hevc' || f.codec === 'h265' || f.codec === 'hev1';
+  if (isHEVC && f.status !== 'pending') return 'row-optimized';
+  if (!isHEVC && f.size > 500 * 1024 * 1024) return 'row-candidate';
+  if (isHEVC) return 'row-optimized';
+  return '';
+}
 
 function renderFiles(files) {
   const area = document.getElementById('fileArea');
@@ -673,15 +728,28 @@ function renderFiles(files) {
     return;
   }
 
+  const sorted = sortFiles(files);
+
   let html = '<div class="file-table-wrap"><table><thead><tr>';
   html += '<th class="check-col"><input type="checkbox" class="file-check" id="selectAll" onclick="toggleSelectAll()" title="Select all"></th>';
-  html += '<th>File</th><th>Codec</th><th>Resolution</th><th>Size</th><th>New Size</th><th>Duration</th><th>Progress</th><th>Status</th><th>Saved</th><th></th>';
+  html += `<th class="sortable${sortCol==='filename'?' active':''}" onclick="setSort('filename')">File${sortArrow('filename')}</th>`;
+  html += `<th class="sortable${sortCol==='codec'?' active':''}" onclick="setSort('codec')">Codec${sortArrow('codec')}</th>`;
+  html += `<th class="sortable${sortCol==='resolution'?' active':''}" onclick="setSort('resolution')">Resolution${sortArrow('resolution')}</th>`;
+  html += `<th class="sortable${sortCol==='size'?' active':''}" onclick="setSort('size')">Size${sortArrow('size')}</th>`;
+  html += '<th>New Size</th>';
+  html += `<th class="sortable${sortCol==='duration'?' active':''}" onclick="setSort('duration')">Duration${sortArrow('duration')}</th>`;
+  html += '<th>Progress</th>';
+  html += `<th class="sortable${sortCol==='status'?' active':''}" onclick="setSort('status')">Status${sortArrow('status')}</th>`;
+  html += '<th>Saved</th><th></th>';
   html += '</tr></thead><tbody>';
 
-  for (const f of files) {
+  for (let idx = 0; idx < sorted.length; idx++) {
+    const f = sorted[idx];
     const codecClass = (f.codec === 'hevc' || f.codec === 'h265' || f.codec === 'hev1') ? 'codec-hevc' : 'codec-other';
     const statusClass = 'status-' + f.status;
     const canSelect = (f.status === 'pending' || f.status === 'skipped');
+    const rowColor = getRowColor(f);
+    const isSelected = selectedIds.has(f.id);
 
     let progressHtml = '';
     if (f.status === 'encoding') {
@@ -704,10 +772,11 @@ function renderFiles(files) {
       : '';
 
     const checkHtml = canSelect
-      ? `<input type="checkbox" class="file-check" data-id="${f.id}" onclick="toggleCheck('${f.id}', this)" ${selectedIds.has(f.id) ? 'checked' : ''}>`
+      ? `<input type="checkbox" class="file-check" data-id="${f.id}" onclick="handleRowClick(event, ${idx}, '${f.id}')" ${isSelected ? 'checked' : ''}>`
       : '';
 
-    html += `<tr>
+    html += `<tr class="${rowColor}${isSelected ? ' selected' : ''}" data-idx="${idx}" data-id="${f.id}" data-selectable="${canSelect ? '1' : '0'}"
+      onmousedown="dragStart(event, ${idx}, '${f.id}')" onmouseenter="dragOver(event, ${idx}, '${f.id}')">
       <td class="check-col">${checkHtml}</td>
       <td class="fname" title="${esc(f.filename)}">${esc(f.filename)}</td>
       <td><span class="codec-badge ${codecClass}">${esc(f.codec)}</span></td>
@@ -724,6 +793,115 @@ function renderFiles(files) {
 
   html += '</tbody></table></div>';
   area.innerHTML = html;
+}
+
+// -- Drag-to-select --
+let isDragging = false;
+let dragStartIdx = -1;
+let dragSelectMode = true; // true = selecting, false = deselecting
+
+function dragStart(e, idx, id) {
+  // Only start drag from left mouse button, not on checkboxes or buttons
+  if (e.button !== 0 || e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+  const row = e.currentTarget;
+  if (row.dataset.selectable !== '1') return;
+
+  isDragging = true;
+  dragStartIdx = idx;
+  // If this row is already selected, drag will deselect; otherwise select
+  dragSelectMode = !selectedIds.has(id);
+
+  if (e.shiftKey && lastClickedIdx >= 0) {
+    // Shift+click range select
+    const sorted = sortFiles(currentFiles);
+    const lo = Math.min(lastClickedIdx, idx);
+    const hi = Math.max(lastClickedIdx, idx);
+    for (let i = lo; i <= hi; i++) {
+      const f = sorted[i];
+      if (f && (f.status === 'pending' || f.status === 'skipped')) {
+        selectedIds.add(f.id);
+      }
+    }
+  } else {
+    if (dragSelectMode) selectedIds.add(id); else selectedIds.delete(id);
+  }
+  lastClickedIdx = idx;
+  updateSelectedCount();
+  updateRowHighlights();
+  e.preventDefault(); // prevent text selection
+}
+
+function dragOver(e, idx, id) {
+  if (!isDragging) return;
+  const row = e.currentTarget;
+  if (row.dataset.selectable !== '1') return;
+  if (dragSelectMode) selectedIds.add(id); else selectedIds.delete(id);
+  updateSelectedCount();
+  updateRowHighlights();
+}
+
+document.addEventListener('mouseup', () => {
+  if (isDragging) {
+    isDragging = false;
+    updateSelectedCount();
+    updateRowHighlights();
+  }
+});
+
+function handleRowClick(e, idx, id) {
+  // Checkbox click handler
+  e.stopPropagation();
+  const cb = e.target;
+
+  if (e.shiftKey && lastClickedIdx >= 0) {
+    const sorted = sortFiles(currentFiles);
+    const lo = Math.min(lastClickedIdx, idx);
+    const hi = Math.max(lastClickedIdx, idx);
+    for (let i = lo; i <= hi; i++) {
+      const f = sorted[i];
+      if (f && (f.status === 'pending' || f.status === 'skipped')) {
+        selectedIds.add(f.id);
+      }
+    }
+    updateSelectedCount();
+    updateRowHighlights();
+    lastClickedIdx = idx;
+    return;
+  }
+
+  if (cb.checked) selectedIds.add(id); else selectedIds.delete(id);
+  lastClickedIdx = idx;
+  updateSelectedCount();
+  updateRowHighlights();
+}
+
+function updateRowHighlights() {
+  document.querySelectorAll('tbody tr[data-id]').forEach(row => {
+    if (selectedIds.has(row.dataset.id)) {
+      row.classList.add('selected');
+      const cb = row.querySelector('.file-check[data-id]');
+      if (cb) cb.checked = true;
+    } else {
+      row.classList.remove('selected');
+      const cb = row.querySelector('.file-check[data-id]');
+      if (cb) cb.checked = false;
+    }
+  });
+}
+
+function selectLargeNonHEVC() {
+  const sorted = sortFiles(currentFiles);
+  let count = 0;
+  for (const f of sorted) {
+    const isHEVC = f.codec === 'hevc' || f.codec === 'h265' || f.codec === 'hev1';
+    if (!isHEVC && f.size > 1024 * 1024 * 1024 && (f.status === 'pending' || f.status === 'skipped')) {
+      selectedIds.add(f.id);
+      count++;
+    }
+  }
+  updateSelectedCount();
+  updateRowHighlights();
+  if (count === 0) alert('No non-HEVC files over 1 GB found.');
 }
 
 function esc(s) {
@@ -816,6 +994,7 @@ function toggleCheck(id, el) {
     selectedIds.delete(id);
   }
   updateSelectedCount();
+  updateRowHighlights();
 }
 
 function updateSelectedCount() {
@@ -835,6 +1014,7 @@ function toggleSelectAll() {
     cb.checked = selectAll.checked;
   });
   updateSelectedCount();
+  updateRowHighlights();
 }
 
 async function squishSelected() {
