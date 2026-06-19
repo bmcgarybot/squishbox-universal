@@ -107,6 +107,67 @@ _hw_encoder: str | None = None  # Will be set to the working GPU encoder
 
 
 # ---------------------------------------------------------------------------
+# Helpers — File Locking (multi-machine safe)
+# ---------------------------------------------------------------------------
+
+import socket as _socket
+
+_LOCK_SUFFIX = ".squishbox.lock"
+_LOCK_STALE_HOURS = 6  # Consider locks older than this stale
+
+
+def _lock_path(filepath: str) -> str:
+    """Return the lock file path for a given video file."""
+    return filepath + _LOCK_SUFFIX
+
+
+def _acquire_lock(filepath: str) -> bool:
+    """Try to create a lock file. Returns True if lock acquired, False if already locked."""
+    lp = _lock_path(filepath)
+    # Check for existing lock
+    if os.path.exists(lp):
+        # Check if stale (older than _LOCK_STALE_HOURS)
+        try:
+            age_hours = (time.time() - os.path.getmtime(lp)) / 3600
+            if age_hours < _LOCK_STALE_HOURS:
+                return False  # Valid lock, skip this file
+            # Stale lock — remove and take over
+            os.remove(lp)
+        except OSError:
+            return False
+    # Create lock
+    try:
+        with open(lp, "w") as f:
+            f.write(f"{_socket.gethostname()}|{os.getpid()}|{time.time()}\n")
+        return True
+    except OSError:
+        return False
+
+
+def _release_lock(filepath: str):
+    """Remove the lock file for a given video file."""
+    try:
+        os.remove(_lock_path(filepath))
+    except OSError:
+        pass
+
+
+def _is_locked(filepath: str) -> bool:
+    """Check if a file is locked by another instance."""
+    lp = _lock_path(filepath)
+    if not os.path.exists(lp):
+        return False
+    try:
+        age_hours = (time.time() - os.path.getmtime(lp)) / 3600
+        if age_hours >= _LOCK_STALE_HOURS:
+            os.remove(lp)  # Clean up stale lock
+            return False
+        return True
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Helpers — FFprobe / FFmpeg
 # ---------------------------------------------------------------------------
 
@@ -372,6 +433,18 @@ def scan_directory(folder: str, append: bool = False) -> dict:
             needs_downscale = max_h and info["height"] > max_h
             already_target = is_hevc and is_target_container and not needs_downscale
 
+        # Check if locked by another SquishBox instance
+        is_locked = _is_locked(str(f))
+        if is_locked:
+            file_status = "skipped"
+            file_error = "Locked by another SquishBox instance"
+        elif already_target:
+            file_status = "skipped"
+            file_error = ""
+        else:
+            file_status = "pending"
+            file_error = ""
+
         scanned_files[fid] = {
             "id": fid,
             "path": str(f),
@@ -382,13 +455,13 @@ def scan_directory(folder: str, append: bool = False) -> dict:
             "height": info["height"] if info else 0,
             "size": info["size"] if info else f.stat().st_size,
             "duration": info["duration"] if info else 0,
-            "status": "skipped" if already_target else "pending",
+            "status": file_status,
             "progress": 0,
             "speed_fps": 0,
             "eta": "",
             "space_saved": 0,
             "new_size": 0,
-            "error": "",
+            "error": file_error,
             "queue_pos": 0,
         }
 
@@ -520,6 +593,22 @@ def _encode_one(file_id: str, worker_id: int, worker_type: str = "gpu"):
 
     src = entry["path"]
 
+    # Multi-machine lock: skip if another instance is encoding this file
+    if not _acquire_lock(src):
+        entry["status"] = "skipped"
+        entry["error"] = "Locked by another SquishBox instance"
+        if worker_id in active_workers:
+            active_workers[worker_id]["file_id"] = None
+        return
+
+    try:
+        _encode_one_inner(entry, src, file_id, worker_id, worker_type)
+    finally:
+        _release_lock(src)
+
+
+def _encode_one_inner(entry, src, file_id, worker_id, worker_type):
+    """Inner encode logic, called with lock held."""
     # Pre-encode safety: re-probe file to catch duplicates already converted
     if os.path.isfile(src):
         recheck = probe_file(src)
