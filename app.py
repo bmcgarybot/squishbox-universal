@@ -2,6 +2,7 @@
 SquishBox — Point at a folder, click squish, watch files shrink.
 A simple batch video transcoder with a web UI. FFmpeg under the hood.
 """
+from __future__ import annotations
 
 import hashlib
 import json
