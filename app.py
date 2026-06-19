@@ -406,8 +406,16 @@ def scan_directory(folder: str, append: bool = False) -> dict:
 
     files_found = []
     min_bytes = settings["min_file_size_mb"] * 1024 * 1024  # convert MB to bytes
-    for f in sorted(folder_path.rglob("*")):
-        if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS:
+    try:
+        all_files = sorted(folder_path.rglob("*"))
+    except OSError:
+        all_files = []
+    for f in all_files:
+        try:
+            is_file = f.is_file()
+        except OSError:
+            continue
+        if is_file and f.suffix.lower() in VIDEO_EXTENSIONS:
             # Skip tiny files (NFO, info stubs, samples)
             try:
                 if f.stat().st_size < min_bytes:
@@ -948,14 +956,20 @@ def api_browse():
     items = []
     try:
         for entry in sorted(target_path.iterdir(), key=lambda e: e.name.lower()):
-            if entry.is_dir() and not entry.name.startswith("."):
-                items.append({
-                    "name": entry.name,
-                    "path": str(entry),
-                    "type": "folder",
-                })
+            try:
+                if entry.is_dir() and not entry.name.startswith("."):
+                    items.append({
+                        "name": entry.name,
+                        "path": str(entry),
+                        "type": "folder",
+                    })
+            except (OSError, PermissionError):
+                # Skip broken symlinks, network shortcuts, and inaccessible entries
+                pass
     except PermissionError:
         return jsonify({"error": "Permission denied"}), 403
+    except OSError:
+        return jsonify({"error": f"Cannot read directory: {target}"}), 400
 
     parent = str(target_path.parent) if target_path.parent != target_path else ""
 
@@ -982,7 +996,8 @@ def api_scan():
 @app.route("/api/files")
 def api_files():
     files = []
-    for fid, entry in scanned_files.items():
+    # Snapshot to avoid "OrderedDict mutated during iteration" when scan thread is running
+    for fid, entry in list(scanned_files.items()):
         # Show relative path from scan root for nested files
         try:
             rel = str(Path(entry["path"]).relative_to(scan_folder))
