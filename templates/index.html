@@ -1170,8 +1170,6 @@ async function saveSettings() {
 // -- Folder Browser --
 let browserCurrentPath = '';
 
-async function openBrowser() {
-
 async function nativeBrowse() {
   try {
     const r = await fetch(API + '/api/native-browse', {method:'POST'});
@@ -1193,7 +1191,7 @@ async function nativeBrowseAdd() {
   } catch(e) { alert('Failed to open folder picker: ' + e.message); }
 }
 
-
+async function openBrowser() {
   browserMode = 'scan';
   document.getElementById('browserOverlay').classList.add('open');
   document.getElementById('browserSelectBtn').textContent = '✅ Scan This Folder';
