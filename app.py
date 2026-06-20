@@ -956,13 +956,16 @@ def api_native_browse():
             path = result.stdout.strip()
             return jsonify({"path": path, "cancelled": False})
         elif sys.platform == "win32":
-            # Windows: use PowerShell folder dialog
+            # Windows: use PowerShell folder dialog (forced to foreground)
             ps_script = '''
 Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Application]::EnableVisualStyles()
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
 $dialog.Description = "Select folder to scan"
 $dialog.ShowNewFolderButton = $false
-$result = $dialog.ShowDialog()
+$form = New-Object System.Windows.Forms.Form
+$form.TopMost = $true
+$result = $dialog.ShowDialog($form)
 if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     Write-Output $dialog.SelectedPath
 } else {
