@@ -2,8 +2,6 @@
 # Double-click to start SquishBox on macOS
 # Prevents sleep + auto-restarts on crash
 cd "$(dirname "$0")"
-pkill -f "python.*app.py" 2>/dev/null
-sleep 1
 source venv/bin/activate 2>/dev/null
 echo ""
 echo "  ╔═══════════════════════════════════╗"
@@ -13,8 +11,15 @@ echo "  ║  Full Disk Access.                ║"
 echo "  ║  Close window = stop SquishBox    ║"
 echo "  ╚═══════════════════════════════════╝"
 echo ""
-# caffeinate -i keeps Mac awake while this runs
 while true; do
+    # Kill any lingering SquishBox processes
+    pkill -f "python.*app.py" 2>/dev/null
+    sleep 2
+    # Wait for port 5555 to be free
+    while lsof -i :5555 >/dev/null 2>&1; do
+        echo "  ⏳ Waiting for port 5555 to free up..."
+        sleep 2
+    done
     caffeinate -i python3 app.py
     echo ""
     echo "  ⚠️  SquishBox stopped. Restarting in 3 seconds..."

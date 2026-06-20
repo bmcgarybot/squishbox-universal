@@ -28,6 +28,10 @@ app = Flask(__name__)
 
 
 # Catch all unhandled errors and return JSON instead of HTML
+@app.errorhandler(404)
+def handle_404(e):
+    return jsonify({"error": "Not found"}), 404
+
 @app.errorhandler(Exception)
 def handle_exception(e):
     import traceback
