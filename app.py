@@ -122,7 +122,7 @@ _hw_encoder: str | None = None  # Will be set to the working GPU encoder
 import socket as _socket
 
 _LOCK_SUFFIX = ".squishbox.lock"
-_LOCK_STALE_HOURS = 6  # Consider locks older than this stale
+_LOCK_STALE_HOURS = 0.5  # Consider locks older than 30 minutes stale
 
 
 def _lock_path(filepath: str) -> str:
@@ -633,8 +633,8 @@ def _encode_one(file_id: str, worker_id: int, worker_type: str = "gpu"):
 
     # Multi-machine lock: skip if another instance is encoding this file
     if not _acquire_lock(src):
-        entry["status"] = "skipped"
-        entry["error"] = "Locked by another SquishBox instance"
+        entry["status"] = "pending"  # Stay pending, not skipped — can retry
+        entry["error"] = ""
         if worker_id in active_workers:
             active_workers[worker_id]["file_id"] = None
         return
