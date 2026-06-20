@@ -1177,7 +1177,7 @@ async function nativeBrowse() {
     if (data.error) { alert('Error: ' + data.error); return; }
     if (data.cancelled || !data.path) return;
     document.getElementById('folderInput').value = data.path;
-    submitFolder(data.path);
+    scanFolder();
   } catch(e) { alert('Failed to open folder picker: ' + e.message); }
 }
 
@@ -1187,7 +1187,8 @@ async function nativeBrowseAdd() {
     const data = await r.json();
     if (data.error) { alert('Error: ' + data.error); return; }
     if (data.cancelled || !data.path) return;
-    addFolder(data.path);
+    document.getElementById('folderInput').value = data.path;
+    addFolder();
   } catch(e) { alert('Failed to open folder picker: ' + e.message); }
 }
 
