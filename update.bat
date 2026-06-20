@@ -10,8 +10,7 @@ echo Pulling latest code...
 git pull
 
 echo Starting SquishBox...
-start "SquishBox" C:\Users\brett\venv\Scripts\python.exe app.py
+start "SquishBox" squishbox.bat
 
-echo.
-echo Done! SquishBox is restarting.
+echo Done!
 timeout /t 3
