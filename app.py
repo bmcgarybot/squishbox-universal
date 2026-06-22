@@ -221,13 +221,15 @@ def detect_gpu_encoder() -> str | None:
 
     for encoder, _ in candidates:
         try:
-            # Quick test: encode 1 frame of black to verify the encoder works
+            # Quick test: encode 1 frame to verify the encoder works
+            # Use nv12 pixel format — some AMD AMF drivers reject the default
             cmd = [
                 "ffmpeg", "-y", "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
+                "-pix_fmt", "nv12",
                 "-c:v", encoder, "-frames:v", "1",
                 "-f", "null", "-",
             ]
-            r = _run(cmd, capture_output=True, text=True, timeout=10)
+            r = _run(cmd, capture_output=True, text=True, timeout=30)
             if r.returncode == 0:
                 _hw_encoder = encoder
                 return _hw_encoder
