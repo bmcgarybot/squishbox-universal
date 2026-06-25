@@ -452,62 +452,73 @@ def scan_directory(folder: str, append: bool = False) -> dict:
             files_found.append(f)
 
     for f in files_found:
-        info = probe_file(str(f))
-        # Use path-based ID so rescans don't create duplicate entries
-        fid = hashlib.md5(str(f).encode()).hexdigest()[:8]
-        already_target = False
-        if info:
-            is_hevc = info["codec"] in ("hevc", "h265", "hev1")
-            max_h = settings["max_resolution"]
-            # In replace mode, container doesn't matter for skip logic
-            if settings["output_mode"] == "replace":
-                is_target_container = True
+        try:
+            info = probe_file(str(f))
+            # Use path-based ID so rescans don't create duplicate entries
+            fid = hashlib.md5(str(f).encode()).hexdigest()[:8]
+            already_target = False
+            if info:
+                is_hevc = info["codec"] in ("hevc", "h265", "hev1")
+                max_h = settings["max_resolution"]
+                # In replace mode, container doesn't matter for skip logic
+                if settings["output_mode"] == "replace":
+                    is_target_container = True
+                else:
+                    is_target_container = f.suffix.lower() == f".{settings['container']}"
+                # Don't skip if resolution exceeds max (user wants to downscale)
+                needs_downscale = max_h and info["height"] > max_h
+                already_target = is_hevc and is_target_container and not needs_downscale
+
+            # Check if locked by another SquishBox instance
+            is_locked = _is_locked(str(f))
+            lock_host = ""
+            if is_locked:
+                file_status = "locked"
+                # Read hostname from lock file
+                try:
+                    with open(_lock_path(str(f)), "r") as lf:
+                        parts = lf.read().strip().split("|")
+                        lock_host = parts[0] if parts else ""
+                except OSError:
+                    pass
+                file_error = f"Locked by {lock_host}" if lock_host else "Locked by another SquishBox instance"
+            elif already_target:
+                file_status = "skipped"
+                file_error = ""
             else:
-                is_target_container = f.suffix.lower() == f".{settings['container']}"
-            # Don't skip if resolution exceeds max (user wants to downscale)
-            needs_downscale = max_h and info["height"] > max_h
-            already_target = is_hevc and is_target_container and not needs_downscale
+                file_status = "pending"
+                file_error = ""
 
-        # Check if locked by another SquishBox instance
-        is_locked = _is_locked(str(f))
-        lock_host = ""
-        if is_locked:
-            file_status = "locked"
-            # Read hostname from lock file
+            # Safe fallback for file size when probe fails and file may have been
+            # deleted/moved by another SquishBox instance during scan
             try:
-                with open(_lock_path(str(f)), "r") as lf:
-                    parts = lf.read().strip().split("|")
-                    lock_host = parts[0] if parts else ""
+                fallback_size = f.stat().st_size
             except OSError:
-                pass
-            file_error = f"Locked by {lock_host}" if lock_host else "Locked by another SquishBox instance"
-        elif already_target:
-            file_status = "skipped"
-            file_error = ""
-        else:
-            file_status = "pending"
-            file_error = ""
+                fallback_size = 0
 
-        scanned_files[fid] = {
-            "id": fid,
-            "path": str(f),
-            "filename": f.name,
-            "codec": info["codec"] if info else "unknown",
-            "resolution": f"{info['width']}x{info['height']}" if info else "?",
-            "width": info["width"] if info else 0,
-            "height": info["height"] if info else 0,
-            "size": info["size"] if info else f.stat().st_size,
-            "duration": info["duration"] if info else 0,
-            "status": file_status,
-            "progress": 0,
-            "speed_fps": 0,
-            "eta": "",
-            "space_saved": 0,
-            "new_size": 0,
-            "error": file_error,
-            "lock_host": lock_host,
-            "queue_pos": 0,
-        }
+            scanned_files[fid] = {
+                "id": fid,
+                "path": str(f),
+                "filename": f.name,
+                "codec": info["codec"] if info else "unknown",
+                "resolution": f"{info['width']}x{info['height']}" if info else "?",
+                "width": info["width"] if info else 0,
+                "height": info["height"] if info else 0,
+                "size": info["size"] if info else fallback_size,
+                "duration": info["duration"] if info else 0,
+                "status": file_status,
+                "progress": 0,
+                "speed_fps": 0,
+                "eta": "",
+                "space_saved": 0,
+                "new_size": 0,
+                "error": file_error,
+                "lock_host": lock_host,
+                "queue_pos": 0,
+            }
+        except (OSError, FileNotFoundError):
+            # File disappeared mid-scan (another instance converted/replaced it)
+            continue
 
     _save_state()
     return {"count": len(scanned_files)}
