@@ -1221,6 +1221,13 @@ def api_clear_locks():
     return jsonify({"ok": True, "cleared": cleared})
 
 
+@app.route("/api/health")
+def api_health():
+    """Identity endpoint so ArrBox (and anything else) can VERIFY this is
+    SquishBox rather than just seeing an open port."""
+    return jsonify({"app": "squishbox", "ok": True})
+
+
 @app.route("/api/scan", methods=["POST"])
 def api_scan():
     data = request.json or {}
