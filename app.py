@@ -445,6 +445,16 @@ def scan_directory(folder: str, append: bool = False) -> dict:
         if is_file and f.suffix.lower() in VIDEO_EXTENSIONS:
             # Skip tiny files (NFO, info stubs, samples)
             try:
+                # Never touch files that are still being written: known
+                # partial-download extensions, our own .sqbak set-asides, or
+                # anything modified in the last 60 seconds.
+                if f.name.lower().endswith((".part", ".!qb", ".crdownload", ".tmp", ".sqbak")):
+                    continue
+                try:
+                    if time.time() - f.stat().st_mtime < 60:
+                        continue
+                except OSError:
+                    continue
                 if f.stat().st_size < min_bytes:
                     continue
             except OSError:
@@ -755,16 +765,32 @@ def _encode_one_inner(entry, src, file_id, worker_id, worker_type):
     # Handle replace mode
     final_dst = _final_path(src, dst)
     if settings["output_mode"] == "replace" and dst != final_dst:
-        # Delete original first to free space on the target drive
+        # SAFE swap: the original is never deleted before its replacement is
+        # in place. Set it aside with an instant same-drive rename (no extra
+        # space needed), move the encode in, then drop the .sqbak. If the
+        # move fails, the original is restored untouched - crash-safe at
+        # every step. (The old flow deleted the original FIRST; a failed
+        # move then meant the file was simply gone.)
+        bak = src + ".sqbak"
         try:
-            os.remove(src)
+            os.replace(src, bak)
         except OSError:
-            pass
-        # Move temp to final (shutil.move handles cross-drive moves)
+            bak = None  # could not set aside; still never delete-first
         try:
             shutil.move(dst, final_dst)
+            if bak:
+                try:
+                    os.remove(bak)
+                except OSError:
+                    pass
         except OSError:
-            entry["error"] = "Encoded OK but failed to replace original"
+            if bak:
+                try:
+                    os.replace(bak, src)  # restore original untouched
+                except OSError:
+                    pass
+            entry["error"] = "Replace failed - your ORIGINAL file was restored untouched"
+            return
 
     # Calculate space saved
     try:
