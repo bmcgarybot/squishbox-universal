@@ -437,6 +437,30 @@
   .col-file { min-width: 180px; white-space: normal; word-break: break-word; }
   .col-progress { min-width: 100px; }
 </style>
+
+    <!-- SquishBox Theme v2: "Molten" - warm charcoal + compression-orange
+         energy. Additive override; delete this block to revert. -->
+    <style id="squishbox-theme-v2">
+    :root {
+        --bg: #14110e;
+        --surface: #1e1915;
+        --border: #35291f;
+        --text: #f2ebe3;
+        --text-dim: #b3a294;
+        --accent: #ff8c42;          /* molten orange - squish energy */
+        --accent-hover: #ffa763;
+        --blue: #4d9dff;
+        --green: #4ade80;
+        --orange: #fbbf24;
+        --red: #f87171;
+        --radius: 10px;
+    }
+    body { background:
+        radial-gradient(ellipse at 20% 0%, #241a10 0%, #14110e 55%) fixed; }
+    button, .btn, a { transition: all .15s ease; }
+    button:hover, .btn:hover { transform: translateY(-1px); }
+    ::selection { background: #ff8c4255; }
+    </style>
 </head>
 <body>
 
