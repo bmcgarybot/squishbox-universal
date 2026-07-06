@@ -800,8 +800,16 @@ def _encode_one_inner(entry, src, file_id, worker_id, worker_type):
                     os.remove(staged)
                 except OSError:
                     pass
-            shutil.move(dst, staged)        # local temp -> destination volume
-            os.replace(staged, final_dst)   # atomic swap over the original name
+            # Data-ONLY copy into the destination dir. shutil.move/copy2 also
+            # copy metadata + xattrs (chmod/utime/setxattr), and those calls
+            # HANG on many SMB/NFS mounts *after* the bytes are already across —
+            # freezing the worker at 100%. copyfile transfers contents only.
+            shutil.copyfile(dst, staged)
+            os.replace(staged, final_dst)   # atomic swap on the destination fs
+            try:
+                os.remove(dst)              # drop the local temp encode
+            except OSError:
+                pass
             # If the container was upgraded (e.g. .avi -> .mkv) the original
             # keeps a different name — remove it now that the .mkv is in place.
             if final_dst != src and os.path.exists(src):
@@ -810,11 +818,12 @@ def _encode_one_inner(entry, src, file_id, worker_id, worker_type):
                 except OSError:
                     pass
         except OSError as e:
-            try:
-                if os.path.exists(staged):
-                    os.remove(staged)
-            except OSError:
-                pass
+            for _p in (staged, dst):
+                try:
+                    if os.path.exists(_p):
+                        os.remove(_p)
+                except OSError:
+                    pass
             entry["error"] = "Replace failed - your ORIGINAL file is untouched (" + str(e)[:120] + ")"
             return
 
