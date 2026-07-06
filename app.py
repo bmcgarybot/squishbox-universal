@@ -800,11 +800,23 @@ def _encode_one_inner(entry, src, file_id, worker_id, worker_type):
                     os.remove(staged)
                 except OSError:
                     pass
-            # Data-ONLY copy into the destination dir. shutil.move/copy2 also
-            # copy metadata + xattrs (chmod/utime/setxattr), and those calls
-            # HANG on many SMB/NFS mounts *after* the bytes are already across —
-            # freezing the worker at 100%. copyfile transfers contents only.
-            shutil.copyfile(dst, staged)
+            # Show the network transfer as its own phase. Big files over SMB
+            # take minutes; without this they sit at 100% "encoding" and look
+            # stuck. Chunked copy (data only — copy2/move also copy metadata +
+            # xattrs, which hang on many SMB/NFS mounts) with live progress.
+            entry["status"] = "finalizing"
+            entry["progress"] = 0
+            entry["eta"] = "transferring"
+            total = os.path.getsize(dst) or 1
+            copied = 0
+            with open(dst, "rb") as fsrc, open(staged, "wb") as fdst:
+                while True:
+                    chunk = fsrc.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    fdst.write(chunk)
+                    copied += len(chunk)
+                    entry["progress"] = round(copied * 100.0 / total, 1)
             os.replace(staged, final_dst)   # atomic swap on the destination fs
             try:
                 os.remove(dst)              # drop the local temp encode
@@ -825,6 +837,7 @@ def _encode_one_inner(entry, src, file_id, worker_id, worker_type):
                 except OSError:
                     pass
             entry["error"] = "Replace failed - your ORIGINAL file is untouched (" + str(e)[:120] + ")"
+            entry["status"] = "error"
             return
 
     # Calculate space saved
@@ -881,7 +894,18 @@ def _worker(worker_id: int, worker_type: str = "gpu"):
                 if qid in scanned_files:
                     scanned_files[qid]["queue_pos"] = i + 1
 
-        _encode_one(file_id, worker_id, worker_type)
+        try:
+            _encode_one(file_id, worker_id, worker_type)
+        except Exception as e:  # noqa: BLE001
+            # A worker thread must never die: that silently reduces the pool
+            # and strands its file at "encoding" forever. Mark the file and
+            # keep the worker alive for the next job.
+            entry = scanned_files.get(file_id)
+            if entry is not None and entry.get("status") not in ("done", "cancelled"):
+                entry["status"] = "error"
+                entry["error"] = ("Worker exception: " + str(e))[:300]
+            if worker_id in active_workers:
+                active_workers[worker_id]["file_id"] = None
 
         if cancel_event.is_set():
             # Mark remaining as pending

@@ -224,6 +224,7 @@
   .status-pending { background: rgba(139,143,163,0.15); color: var(--text-dim); }
   .status-queued { background: rgba(96,165,250,0.15); color: var(--blue); }
   .status-encoding { background: rgba(124,92,252,0.15); color: var(--accent); }
+  .status-finalizing { background: rgba(245,158,11,0.15); color: #f59e0b; }
   .status-locked { background: rgba(251,191,36,0.15); color: var(--orange); }
   .status-done { background: rgba(52,211,153,0.15); color: var(--green); }
   .status-error { background: rgba(248,113,113,0.15); color: var(--red); }
@@ -721,7 +722,7 @@ let lastClickedIdx = -1;
 function sortFiles(files) {
   const dir = sortDir === 'asc' ? 1 : -1;
   // Smart status priority: encoding first, then queued (by position), locked, pending, done, skipped, error
-  const statusPriority = { encoding: 0, queued: 1, locked: 2, pending: 3, done: 4, skipped: 5, error: 6, cancelled: 7 };
+  const statusPriority = { encoding: 0, finalizing: 0.5, queued: 1, locked: 2, pending: 3, done: 4, skipped: 5, error: 6, cancelled: 7 };
   return [...files].sort((a, b) => {
     let va, vb;
     switch (sortCol) {
