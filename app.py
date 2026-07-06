@@ -431,6 +431,20 @@ def scan_directory(folder: str, append: bool = False) -> dict:
     if not folder_path.is_dir():
         return {"error": f"Not a valid directory: {folder}"}
 
+    # Self-heal interrupted replace-swaps. A leftover ".sqbak" means a previous
+    # finalize was cut off before it completed (a successful one deletes it), so
+    # the ".sqbak" holds the guaranteed-intact original. Restore it over whatever
+    # partial file may be sitting at the real name, then let it re-encode cleanly.
+    try:
+        for bak in folder_path.rglob("*.sqbak"):
+            original = bak.with_suffix("")  # strip the .sqbak
+            try:
+                os.replace(str(bak), str(original))  # atomic; original never lost
+            except OSError:
+                pass
+    except OSError:
+        pass
+
     files_found = []
     min_bytes = settings["min_file_size_mb"] * 1024 * 1024  # convert MB to bytes
     try:
@@ -446,12 +460,16 @@ def scan_directory(folder: str, append: bool = False) -> dict:
             # Skip tiny files (NFO, info stubs, samples)
             try:
                 # Never touch files that are still being written: known
-                # partial-download extensions, our own .sqbak set-asides, or
-                # anything modified in the last 60 seconds.
-                if f.name.lower().endswith((".part", ".!qb", ".crdownload", ".tmp", ".sqbak")):
+                # partial-download extensions and our own temp/set-aside files.
+                if f.name.lower().endswith((".part", ".!qb", ".crdownload", ".tmp", ".sqtmp", ".sqbak")):
                     continue
+                # Skip files modified in the last 60 seconds — but guard against
+                # clock skew between machines (a file server clock ahead of this
+                # one makes every file look "just modified"). Only skip when the
+                # age is a real, positive, recent interval.
                 try:
-                    if time.time() - f.stat().st_mtime < 60:
+                    age = time.time() - f.stat().st_mtime
+                    if 0 <= age < 60:
                         continue
                 except OSError:
                     continue
@@ -765,31 +783,39 @@ def _encode_one_inner(entry, src, file_id, worker_id, worker_type):
     # Handle replace mode
     final_dst = _final_path(src, dst)
     if settings["output_mode"] == "replace" and dst != final_dst:
-        # SAFE swap: the original is never deleted before its replacement is
-        # in place. Set it aside with an instant same-drive rename (no extra
-        # space needed), move the encode in, then drop the .sqbak. If the
-        # move fails, the original is restored untouched - crash-safe at
-        # every step. (The old flow deleted the original FIRST; a failed
-        # move then meant the file was simply gone.)
-        bak = src + ".sqbak"
+        # Network-safe atomic swap. The old flow renamed the ORIGINAL over the
+        # network first (os.replace to .sqbak); over SMB/NFS that call can block
+        # on an open/locked file and hang the worker at 100%. Instead:
+        #   1. move the encoded temp into the DESTINATION directory under a
+        #      hidden temp name (this is the unavoidable network transfer, but
+        #      it never touches the original),
+        #   2. swap it over the original with ONE atomic same-filesystem rename.
+        # The original is only replaced at the final instant, so any failure
+        # leaves it fully intact, and nothing renames the still-open original.
+        dest_dir = os.path.dirname(final_dst) or "."
+        staged = os.path.join(dest_dir, "." + Path(final_dst).name + ".sqtmp")
         try:
-            os.replace(src, bak)
-        except OSError:
-            bak = None  # could not set aside; still never delete-first
-        try:
-            shutil.move(dst, final_dst)
-            if bak:
+            if os.path.exists(staged):
                 try:
-                    os.remove(bak)
+                    os.remove(staged)
                 except OSError:
                     pass
-        except OSError:
-            if bak:
+            shutil.move(dst, staged)        # local temp -> destination volume
+            os.replace(staged, final_dst)   # atomic swap over the original name
+            # If the container was upgraded (e.g. .avi -> .mkv) the original
+            # keeps a different name — remove it now that the .mkv is in place.
+            if final_dst != src and os.path.exists(src):
                 try:
-                    os.replace(bak, src)  # restore original untouched
+                    os.remove(src)
                 except OSError:
                     pass
-            entry["error"] = "Replace failed - your ORIGINAL file was restored untouched"
+        except OSError as e:
+            try:
+                if os.path.exists(staged):
+                    os.remove(staged)
+            except OSError:
+                pass
+            entry["error"] = "Replace failed - your ORIGINAL file is untouched (" + str(e)[:120] + ")"
             return
 
     # Calculate space saved
